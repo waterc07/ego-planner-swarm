@@ -8,7 +8,7 @@
 
 ### 2.1 安装cyclonedds
 ```
-sudo apt install ros-humble-rmw-cyclonedds-cpp
+sudo apt install ros-lyrical-rmw-cyclonedds-cpp
 ```
 
 ### 2.2 修改默认的DDS
