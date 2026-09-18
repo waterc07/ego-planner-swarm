@@ -19,7 +19,7 @@ source ~/.bashrc
 
 ### 2.3 检查是否修改成功
 ```
-ros2 doctor --report | grep "RMW middleware"
+ros2 doctor --report | grep -i "middleware name"
 ```
 输出显示rmw_cyclonedds_cpp则说明修改成功
 
