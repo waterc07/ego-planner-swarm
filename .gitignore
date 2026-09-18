@@ -7,3 +7,15 @@ src/CMakeLists.txt
 benchmark_haha.zip
 rebound_planner_BB.zip
 
+# colcon 产物,每次编译可再生
+install/
+log/
+
+# 编辑器本机配置(含绝对路径)
+*.code-workspace
+.vscode.zip
+
+# Python 缓存(launch 文件、消息包 import 后生成)
+__pycache__/
+*.pyc
+
