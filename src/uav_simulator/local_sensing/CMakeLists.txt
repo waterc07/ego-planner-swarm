@@ -1,5 +1,6 @@
 cmake_minimum_required(VERSION 3.8)
 project(local_sensing)
+find_package(ament_target_dependencies_compat REQUIRED)
 
 # 设置编译选项
 set(CMAKE_BUILD_TYPE Release)

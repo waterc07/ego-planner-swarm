@@ -1,0 +1,17 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>ament_target_dependencies_compat</name>
+  <version>1.0.0</version>
+  <description>Compatibility shim restoring the ament_target_dependencies() macro removed in ROS 2 Lyrical</description>
+  <maintainer email="waterc@todo.todo">waterc</maintainer>
+  <license>BSD-3-Clause</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <build_export_depend>ament_cmake_core</build_export_depend>
+  <build_export_depend>ament_cmake_target_dependencies</build_export_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

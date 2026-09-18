@@ -13,6 +13,7 @@ endif()
 
 # find dependencies
 find_package(ament_cmake REQUIRED)
+find_package(ament_target_dependencies_compat REQUIRED)
 find_package(rclcpp REQUIRED)
 # set(PCL_DIR "/usr/local/share/pcl-1.14")
 # find_package(PCL REQUIRED)

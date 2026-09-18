@@ -4,10 +4,10 @@
 
 // ROS2 依赖项
 #include "rclcpp/rclcpp.hpp"
-#include <message_filters/subscriber.h>
-#include <message_filters/synchronizer.h>
-#include <message_filters/sync_policies/exact_time.h>
-#include <message_filters/sync_policies/approximate_time.h>
+#include <message_filters/subscriber.hpp>
+#include <message_filters/synchronizer.hpp>
+#include <message_filters/sync_policies/exact_time.hpp>
+#include <message_filters/sync_policies/approximate_time.hpp>
 #include "geometry_msgs/msg/pose_stamped.hpp"
 #include "geometry_msgs/msg/transform_stamped.hpp"
 #include "image_transport/image_transport.hpp"
@@ -18,8 +18,8 @@
 #include "std_msgs/msg/bool.hpp"
 
 // TF 相关
-#include "tf2/LinearMath/Quaternion.h"
-#include "tf2/convert.h"
+#include "tf2/LinearMath/Quaternion.hpp"
+#include "tf2/convert.hpp"
 #include "tf2_ros/transform_broadcaster.h"
 
 // PCL 相关
@@ -34,7 +34,7 @@
 #include "opencv2/highgui/highgui.hpp"
 #include <opencv2/opencv.hpp>
 #include <opencv2/core/eigen.hpp>
-#include <cv_bridge/cv_bridge.h>
+#include <cv_bridge/cv_bridge.hpp>
 
 // 自定义头文件
 #include "depth_render.cuh"

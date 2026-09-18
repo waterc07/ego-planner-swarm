@@ -137,7 +137,7 @@ void GridMap::initMap(rclcpp::Node::SharedPtr node)
 
   // 初始化 message_filters::Subscriber
   depth_sub_ = std::make_shared<message_filters::Subscriber<sensor_msgs::msg::Image>>(
-      node_, "grid_map/depth", rclcpp::QoS(50).get_rmw_qos_profile());
+      node_, "grid_map/depth", rclcpp::QoS(50));
 
   extrinsic_sub_ = node_->create_subscription<nav_msgs::msg::Odometry>(
       "/vins_estimator/extrinsic", 10,
@@ -146,7 +146,7 @@ void GridMap::initMap(rclcpp::Node::SharedPtr node)
   if (mp_.pose_type_ == POSE_STAMPED)
   {
     pose_sub_ = std::make_shared<message_filters::Subscriber<geometry_msgs::msg::PoseStamped>>(
-        node_, "grid_map/pose", rclcpp::QoS(25).get_rmw_qos_profile());
+        node_, "grid_map/pose", rclcpp::QoS(25));
 
     sync_image_pose_ = std::make_shared<message_filters::Synchronizer<SyncPolicyImagePose>>(
         SyncPolicyImagePose(100), *depth_sub_, *pose_sub_);
@@ -156,7 +156,7 @@ void GridMap::initMap(rclcpp::Node::SharedPtr node)
   else if (mp_.pose_type_ == ODOMETRY)
   {
     odom_sub_ = std::make_shared<message_filters::Subscriber<nav_msgs::msg::Odometry>>(
-        node_, "grid_map/odom", rclcpp::QoS(100).get_rmw_qos_profile());
+        node_, "grid_map/odom", rclcpp::QoS(100));
 
     sync_image_odom_ = std::make_shared<message_filters::Synchronizer<SyncPolicyImageOdom>>(
         SyncPolicyImageOdom(100), *depth_sub_, *odom_sub_);
