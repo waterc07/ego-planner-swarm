@@ -1,3 +1,4 @@
+#include "ego_planner/trajectory_validation.h"
 // #include <fstream>
 #include <ego_planner/planner_manager.h>
 #include <thread>
@@ -292,44 +293,65 @@ namespace ego_planner
     UniformBspline pos = UniformBspline(ctrl_pts, 3, ts);
     pos.setPhysicalLimits(pp_.max_vel_, pp_.max_acc_, pp_.feasibility_tolerance_);
 
-    /*** STEP 3: REFINE(RE-ALLOCATE TIME) IF NECESSARY ***/
-    // Note: Only adjust time in single drone mode. But we still allow drone_0 to adjust its time profile.
-    if (pp_.drone_id <= 0)
-    {
+    // Replace the old per-axis feasibility pass with one norm-bound repair loop.
+    // At a stationary start and zero target velocity, time dilation preserves the
+    // optimized collision-avoiding path. Moving-boundary cases retain refinement.
+    const bool stationary_boundaries = start_vel.norm() < 1e-8 &&
+        start_acc.norm() < 1e-8 && local_target_vel.norm() < 1e-8;
 
-      double ratio;
-      bool flag_step_2_success = true;
-      if (!pos.checkFeasibility(ratio, false))
-      {
-        cout << "Need to reallocate time." << endl;
-
-        Eigen::MatrixXd optimal_control_points;
-        flag_step_2_success = refineTrajAlgo(pos, start_end_derivatives, ratio, ts, optimal_control_points);
-        if (flag_step_2_success)
-          pos = UniformBspline(optimal_control_points, 3, ts);
-      }
-
-      if (!flag_step_2_success)
-      {
-        printf("\033[34mThis refined trajectory hits obstacles. It doesn't matter if appeares occasionally. But if continously appearing, Increase parameter \"lambda_fitness\".\n\033[0m");
-        continous_failures_count_++;
-        return false;
-      }
+    // Whole-interval conservative bounds; refinement may also change geometry.
+    const double v_allow = pp_.max_vel_ * (1.0 + pp_.feasibility_tolerance_);
+    const double a_allow = pp_.max_acc_ * (1.0 + pp_.feasibility_tolerance_);
+    TrajectoryBounds bounds{};
+    const bool feasible = v_allow > 0 && a_allow > 0 &&
+      validateWithRepairs(3,
+        [&]() {
+          bounds = trajectoryBounds(pos);
+          return std::isfinite(bounds.velocity) && std::isfinite(bounds.acceleration) &&
+                 bounds.velocity <= v_allow && bounds.acceleration <= a_allow;
+        },
+        [&]() {
+          if (pp_.drone_id > 0 || !std::isfinite(bounds.velocity) ||
+              !std::isfinite(bounds.acceleration)) return false;
+          const double ratio = std::max(1.02, std::max(bounds.velocity / v_allow,
+                                                     std::sqrt(bounds.acceleration / a_allow)));
+          if (stationary_boundaries) {
+            if (!dilateCubicTime(pos, ratio)) return false;
+            ts *= ratio;
+            pos.setPhysicalLimits(pp_.max_vel_, pp_.max_acc_, pp_.feasibility_tolerance_);
+            return true;
+          }
+          Eigen::MatrixXd refined_ctrl;
+          double refined_ts = ts;
+          if (!refineTrajAlgo(pos, start_end_derivatives, ratio, refined_ts, refined_ctrl) ||
+              refined_ctrl.rows() != 3 || refined_ctrl.cols() < 4 ||
+              !refined_ctrl.allFinite() || !std::isfinite(refined_ts) || refined_ts <= 0)
+            return false;
+          pos = UniformBspline(refined_ctrl, 3, refined_ts);
+          pos.setPhysicalLimits(pp_.max_vel_, pp_.max_acc_, pp_.feasibility_tolerance_);
+          ts = refined_ts;
+          return true;
+        });
+    Eigen::Vector3d blocked_voxel = Eigen::Vector3d::Constant(std::numeric_limits<double>::quiet_NaN());
+    const bool collision_free = feasible && sweptPathClear(
+      pos, bounds.velocity, grid_map_->getResolution(), grid_map_->getOrigin(),
+      [&](const Eigen::Vector3d& p) {
+        const bool blocked = !grid_map_->isInMap(p) || grid_map_->getInflateOccupancy(p) != 0;
+        if (blocked) blocked_voxel = p;
+        return blocked;
+      });
+    if (!collision_free) {
+      RCLCPP_WARN(rclcpp::get_logger("ego_planner"),
+                  "Final trajectory rejected: feasible=%d velocity_bound=%.6f acceleration_bound=%.6f collision_free=%d",
+                  feasible, bounds.velocity, bounds.acceleration, collision_free);
+      if (feasible)
+        RCLCPP_WARN(rclcpp::get_logger("ego_planner"),
+                    "Blocked voxel: %.3f %.3f %.3f", blocked_voxel.x(), blocked_voxel.y(), blocked_voxel.z());
+      continous_failures_count_++;
+      return false; // FSM invalidates executor output; NOT a hover guarantee.
     }
-    else
-    {
-      static bool print_once = true;
-      if (print_once)
-      {
-        print_once = false;
-        RCLCPP_ERROR(rclcpp::get_logger("ego_planner"), "IN SWARM MODE, REFINE DISABLED!");
-      }
-    }
-
-    // t_refine = ros::Time::now() - t_start;
     t_refine = rclcpp::Clock().now() - t_start;
-
-    // save planned results
+    // Exactly one ID and start-time update per accepted candidate.
     updateTrajInfo(pos, rclcpp::Clock().now());
 
     static double sum_time = 0;

@@ -91,4 +91,11 @@ install(
   DESTINATION share/${PROJECT_NAME}/launch
 )
 
+if(BUILD_TESTING)
+  enable_testing()
+  add_executable(test_trajectory_validation test/test_trajectory_validation.cpp)
+  ament_target_dependencies(test_trajectory_validation bspline_opt)
+  add_test(NAME trajectory_validation COMMAND test_trajectory_validation)
+endif()
+
 ament_package()

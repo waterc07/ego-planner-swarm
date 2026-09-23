@@ -3,6 +3,7 @@
 
 #include <Eigen/Eigen>
 #include <algorithm>
+#include <chrono>
 #include <iostream>
 #include "nav_msgs/msg/path.hpp"
 #include "nav_msgs/msg/odometry.hpp"
@@ -30,6 +31,8 @@ namespace ego_planner
   {
 
   private:
+    double retry_backoff_s_ = 0.5;
+    std::chrono::steady_clock::time_point next_replan_attempt_{};
     /* ---------- flag ---------- */
     enum FSM_EXEC_STATE
     {

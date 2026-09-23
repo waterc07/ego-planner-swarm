@@ -26,6 +26,19 @@ double time_forward_;
 
 void bsplineCallback(traj_utils::msg::Bspline::ConstPtr msg)
 {
+  // Empty/order=0 invalidates the previous trajectory (project-local protocol).
+  if (msg->pos_pts.empty() || msg->order != 3 ||
+      msg->pos_pts.size() < 4 || msg->knots.size() != msg->pos_pts.size() + 4) {
+    receive_traj_ = false; traj_.clear(); return;
+  }
+  for (const auto& p : msg->pos_pts)
+    if (!std::isfinite(p.x) || !std::isfinite(p.y) || !std::isfinite(p.z)) {
+      receive_traj_ = false; traj_.clear(); return;
+    }
+  for (size_t i=0; i<msg->knots.size(); ++i)
+    if (!std::isfinite(msg->knots[i]) || (i && msg->knots[i] <= msg->knots[i-1])) {
+      receive_traj_ = false; traj_.clear(); return;
+    }
   // parse pos traj
 
   Eigen::MatrixXd pos_pts(3, msg->pos_pts.size());
@@ -167,7 +180,7 @@ void cmdCallback()
     return;
 
   // 统一时间源
-  rclcpp::Clock clock(RCL_ROS_TIME);  
+  rclcpp::Clock clock(RCL_ROS_TIME);
   rclcpp::Time time_now = clock.now();
   double t_cur = (time_now - start_time_).seconds();
 

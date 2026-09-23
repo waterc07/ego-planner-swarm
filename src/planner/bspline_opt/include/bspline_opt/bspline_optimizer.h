@@ -154,6 +154,7 @@ namespace ego_planner
     double start_time_;                 // global time for moving obstacles
 
     /* optimization parameters */
+    bool full_path_collision_check_ = false; // Boom_Birds offline opt-in
     int order_;                    // bspline degree
     double lambda1_;               // jerk smoothness weight
     double lambda2_, new_lambda2_; // distance weight

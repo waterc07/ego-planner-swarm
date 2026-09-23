@@ -3,7 +3,12 @@
 
 #include <Eigen/Eigen>
 #include <Eigen/StdVector>
+// [BB-PATCH-JAZZY] ROS 2 Jazzy 起 cv_bridge 只提供 cv_bridge.hpp（Humble 及更早为 cv_bridge.h）
+#if __has_include(<cv_bridge/cv_bridge.hpp>)
+#include <cv_bridge/cv_bridge.hpp>
+#else
 #include <cv_bridge/cv_bridge.h>
+#endif
 #include <geometry_msgs/msg/pose_stamped.hpp>
 #include <iostream>
 #include <random>
@@ -67,6 +72,11 @@ struct MappingParameters
 
   /* depth image projection filtering */
   double depth_filter_maxdist_, depth_filter_mindist_, depth_filter_tolerance_;
+  // [BB-PATCH-1] 无效观测上限（米）：NaN / 非正 / 超过该值的深度视为"无信息"。
+  // 由 initMap 依据 max_ray_length_ 与 depth_filter_maxdist_ 推导。
+  double invalid_depth_max_dist_;
+  // [BB-PATCH-READY] 就绪门控阈值
+  int ready_min_fusion_updates_;
   int depth_filter_margin_;
   bool use_depth_filter_;
   double k_depth_scaling_factor_;
@@ -107,12 +117,19 @@ struct MappingData
   // depth image data
 
   cv::Mat depth_image_, last_depth_image_;
+  // [BB-PATCH-1] 与 depth_image_ 同形的无效观测掩码（CV_8UC1，255=无效，0=有效）
+  cv::Mat depth_invalid_mask_;
   int image_cnt_;
 
   // flags of map state
 
   bool occ_need_update_, local_updated_;
+  // has_first_depth_: 仅表示"深度过滤分支已处理过第一帧"（用于跳过首帧投影），
+  // 与"是否已有有效深度观测"无关，勿用于其它判断。
   bool has_first_depth_;
+  // [BB-PATCH-4] 是否已收到过有效深度观测（两个投影分支都会置位）。
+  // 独立 odom 回调只在该标志为 false 时才允许预置 camera_pos_。
+  bool has_valid_depth_obs_;
   bool has_odom_, has_cloud_;
 
   // odom_depth_timeout_
@@ -140,6 +157,9 @@ struct MappingData
 
   double fuse_time_, max_fuse_time_;
   int update_num_;
+  // [BB-PATCH-READY] 真正完成一次"深度→占据"融合的帧数（仅当产生投影点时自增）。
+  // 与 update_num_ 的区别：后者在相机位姿落在图外时也会自增，不能用于就绪判据。
+  int depth_fusion_updates_;
 
   EIGEN_MAKE_ALIGNED_OPERATOR_NEW
 };
@@ -188,6 +208,9 @@ public:
   void publishDepth();
 
   bool hasDepthObservation();
+  // [BB-PATCH-READY] 就绪查询：至少完成 N 次深度融合（地图已被深度数据真正写过）
+  bool mapReady(int min_fusion_updates);
+  int getReadyMinFusionUpdates() { return mp_.ready_min_fusion_updates_; }
   bool odomValid();
   void getRegion(Eigen::Vector3d &ori, Eigen::Vector3d &size);
   inline double getResolution();
@@ -216,6 +239,8 @@ private:
   void visCallback();
 
   // main update process
+  // [BB-PATCH-1] 依据原始深度图建立无效观测掩码
+  void buildDepthInvalidMask(const cv::Mat &raw_depth);
   void projectDepthImage();
   void raycastProcess();
   void clearAndInflateLocalMap();

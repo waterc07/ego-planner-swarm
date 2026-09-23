@@ -22,6 +22,9 @@ namespace ego_planner
     node_->declare_parameter("fsm/emergency_time", 1.0);
     node_->declare_parameter("fsm/realworld_experiment", false);
     node_->declare_parameter("fsm/fail_safe", true);
+    retry_backoff_s_ = node_->declare_parameter("fsm/retry_backoff_s", 0.5);
+    if (!std::isfinite(retry_backoff_s_) || retry_backoff_s_ < 0.01)
+      throw std::invalid_argument("fsm/retry_backoff_s must be finite and >= 0.01");
 
     node_->get_parameter("fsm/flight_type", target_type_);
     node_->get_parameter("fsm/thresh_replan_time", replan_thresh_);
@@ -477,6 +480,12 @@ namespace ego_planner
       fsm_num = 0;
     }
 
+    // Back off failed planning without delaying emergency-stop processing.
+    if ((exec_state_ == SEQUENTIAL_START || exec_state_ == GEN_NEW_TRAJ ||
+         exec_state_ == REPLAN_TRAJ) &&
+        std::chrono::steady_clock::now() < next_replan_attempt_)
+      goto force_return;
+
     switch (exec_state_)
     {
     case INIT:
@@ -783,8 +792,38 @@ namespace ego_planner
   bool EGOReplanFSM::callReboundReplan(bool flag_use_poly_init, bool flag_randomPolyTraj)
   {
 
+    if (std::chrono::steady_clock::now() < next_replan_attempt_)
+      return false;
+    auto defer_retry = [&]() {
+      next_replan_attempt_ = std::chrono::steady_clock::now() +
+          std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+              std::chrono::duration<double>(retry_backoff_s_));
+    };
+
+    // Project-local invalidation envelope on the same ordered reliable topic.
+    // Executor stops setpoints until a new accepted trajectory arrives.
+    auto invalidate_executor = [&]() {
+      // Repeat at the bounded retry rate so late subscribers also invalidate.
+      traj_utils::msg::Bspline invalid;
+      invalid.order = 0;
+      bspline_pub_->publish(invalid);
+    };
+
     getLocalTarget();
 
+    // [BB-PATCH-READY] 建图就绪门控：地图尚未被深度数据真正写入时不生成轨迹。
+    // 实测在链路刚启动时会用"半张地图"规划出与障碍相交的轨迹；这些轨迹不应发布。
+    // 判据：至少完成 min_fusion_updates 次有效深度融合（参数 grid_map/ready_min_fusion_updates）。
+    if (!planner_manager_->grid_map_->mapReady(planner_manager_->grid_map_->getReadyMinFusionUpdates()))
+    {
+      RCLCPP_WARN_THROTTLE(node_->get_logger(), *node_->get_clock(), 1000,
+                           "[BB-PATCH-READY] 建图未就绪（有效深度融合不足），本帧不规划");
+      invalidate_executor();
+      defer_retry();
+      return false;
+    }
+
+    RCLCPP_INFO(node_->get_logger(), "BB_REPLAN_ATTEMPT");
     bool plan_and_refine_success =
         planner_manager_->reboundReplan(start_pt_, start_vel_, start_acc_, local_target_pt_, local_target_vel_, (have_new_target_ || flag_use_poly_init), flag_randomPolyTraj);
     have_new_target_ = false;
@@ -829,6 +868,10 @@ namespace ego_planner
       visualization_->displayOptimalList(info->position_traj_.get_control_points(), 0);
     }
 
+    if (!plan_and_refine_success) {
+      invalidate_executor();
+      defer_retry();
+    }
     return plan_and_refine_success;
   }
 

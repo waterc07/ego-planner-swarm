@@ -45,6 +45,7 @@ void GridMap::initMap(rclcpp::Node::SharedPtr node)
   node_->declare_parameter("grid_map/local_map_margin", 1);
   node_->declare_parameter("grid_map/ground_height", 1.0);
   node_->declare_parameter("grid_map/odom_depth_timeout", 1.0);
+  node_->declare_parameter("grid_map/ready_min_fusion_updates", 5);  // [BB-PATCH-READY]
 
   node_->get_parameter("grid_map/resolution", mp_.resolution_);
   node_->get_parameter("grid_map/map_size_x", x_size);
@@ -82,6 +83,24 @@ void GridMap::initMap(rclcpp::Node::SharedPtr node)
   node_->get_parameter("grid_map/local_map_margin", mp_.local_map_margin_);
   node_->get_parameter("grid_map/ground_height", mp_.ground_height_);
   node_->get_parameter("grid_map/odom_depth_timeout", mp_.odom_depth_timeout_);
+  node_->get_parameter("grid_map/ready_min_fusion_updates", mp_.ready_min_fusion_updates_);
+
+  // [BB-PATCH-1] 无效深度上限：优先取 depth_filter_maxdist（当其大于射线量程时），
+  // 否则退回 max_ray_length + 0.1；两者都未配置时不设上限（仅过滤 NaN/非正值）。
+  // 注意：位于 (max_ray_length, 上限] 的深度仍是"经过验证的超量程观测"，
+  // 由 raycastProcess 按既有射线逻辑截断到最大量程并清空空间（见 [BB-PATCH-5]）。
+  if (mp_.depth_filter_maxdist_ > 0.0 && mp_.depth_filter_maxdist_ > mp_.max_ray_length_)
+  {
+    mp_.invalid_depth_max_dist_ = mp_.depth_filter_maxdist_;
+  }
+  else if (mp_.max_ray_length_ > 0.0)
+  {
+    mp_.invalid_depth_max_dist_ = mp_.max_ray_length_ + 0.1;
+  }
+  else
+  {
+    mp_.invalid_depth_max_dist_ = 1e9;
+  }
 
   if (mp_.virtual_ceil_height_ - mp_.ground_height_ > z_size)
   {
@@ -187,6 +206,8 @@ void GridMap::initMap(rclcpp::Node::SharedPtr node)
   md_.occ_need_update_ = false;
   md_.local_updated_ = false;
   md_.has_first_depth_ = false;
+  md_.has_valid_depth_obs_ = false;    // [BB-PATCH-4]
+  md_.depth_invalid_mask_ = cv::Mat(); // [BB-PATCH-1]
   md_.has_odom_ = false;
   md_.has_cloud_ = false;
   md_.image_cnt_ = 0;
@@ -194,6 +215,7 @@ void GridMap::initMap(rclcpp::Node::SharedPtr node)
 
   md_.fuse_time_ = 0.0;
   md_.update_num_ = 0;
+  md_.depth_fusion_updates_ = 0;  // [BB-PATCH-READY]
   md_.max_fuse_time_ = 0.0;
 
   md_.flag_depth_odom_timeout_ = false;
@@ -257,16 +279,87 @@ int GridMap::setCacheOccupancy(Eigen::Vector3d pos, int occ)
   return idx_ctns;
 }
 
+// [BB-PATCH-1] 建立与深度图同形的无效观测掩码（255=无效，0=有效）。
+// 无效定义：NaN / Inf、非正深度、超过 invalid_depth_max_dist_ 的深度（含 16UC1 的 0 与饱和值 65535）。
+// 原因：cv_bridge 的 convertTo(CV_16UC1) 会把 NaN、负值静默饱和成 0，之后 0 深度会被投影到相机
+// 原点（use_depth_filter=false）或被当作超量程自由空间（use_depth_filter=true），两种都是伪造观测。
+// 修订来源：task-2 C.1。
+void GridMap::buildDepthInvalidMask(const cv::Mat &raw_depth)
+{
+  if (raw_depth.empty())
+  {
+    md_.depth_invalid_mask_ = cv::Mat();
+    return;
+  }
+
+  md_.depth_invalid_mask_ = cv::Mat(raw_depth.rows, raw_depth.cols, CV_8UC1, cv::Scalar(255));
+
+  const double max_dist = mp_.invalid_depth_max_dist_;
+  int valid_cnt = 0;
+
+  if (raw_depth.type() == CV_32FC1)
+  {
+    for (int v = 0; v < raw_depth.rows; ++v)
+    {
+      const float *dptr = raw_depth.ptr<float>(v);
+      uchar *mptr = md_.depth_invalid_mask_.ptr<uchar>(v);
+      for (int u = 0; u < raw_depth.cols; ++u)
+      {
+        const float z = dptr[u];
+        // 注意：用 z == z 判 NaN、用 z <= max_dist 排除 +Inf，避免依赖 <cmath> 的重载
+        if ((z == z) && (z > 0.0f) && ((double)z <= max_dist))
+        {
+          mptr[u] = 0;
+          ++valid_cnt;
+        }
+      }
+    }
+  }
+  else if (raw_depth.type() == CV_16UC1)
+  {
+    const double inv_factor = 1.0 / mp_.k_depth_scaling_factor_;
+    for (int v = 0; v < raw_depth.rows; ++v)
+    {
+      const uint16_t *dptr = raw_depth.ptr<uint16_t>(v);
+      uchar *mptr = md_.depth_invalid_mask_.ptr<uchar>(v);
+      for (int u = 0; u < raw_depth.cols; ++u)
+      {
+        const double z = dptr[u] * inv_factor;
+        if (dptr[u] != 0 && z > 0.0 && z <= max_dist)
+        {
+          mptr[u] = 0;
+          ++valid_cnt;
+        }
+      }
+    }
+  }
+  else
+  {
+    RCLCPP_WARN_ONCE(node_->get_logger(),
+                     "[BB-PATCH-1] unsupported depth encoding %d, treat all pixels as invalid",
+                     raw_depth.type());
+  }
+
+  if (valid_cnt > 0)
+    md_.has_valid_depth_obs_ = true; // [BB-PATCH-4] 至少一个有效深度像素即视为已有有效深度观测
+}
+
 void GridMap::projectDepthImage()
 {
   // md_.proj_points_.clear();
   md_.proj_points_cnt = 0;
 
-  uint16_t *row_ptr;
   // int cols = current_img_.cols, rows = current_img_.rows;
   int cols = md_.depth_image_.cols;
   int rows = md_.depth_image_.rows;
   int skip_pix = mp_.skip_pixel_;
+
+  // [BB-PATCH-1/2] 掩码可用性检查。掩码缺失或尺寸不符时退化为
+  // "原始深度为 0 即无效"的保守判断，避免越界读取。
+  const bool mask_ok = (!md_.depth_invalid_mask_.empty() &&
+                        md_.depth_invalid_mask_.type() == CV_8UC1 &&
+                        md_.depth_invalid_mask_.rows == rows &&
+                        md_.depth_invalid_mask_.cols == cols);
 
   double depth;
 
@@ -276,13 +369,23 @@ void GridMap::projectDepthImage()
   {
     for (int v = 0; v < rows; v += skip_pix)
     {
-      row_ptr = md_.depth_image_.ptr<uint16_t>(v);
+      const uint16_t *row_ptr = md_.depth_image_.ptr<uint16_t>(v);
+      const uchar *mask_ptr = mask_ok ? md_.depth_invalid_mask_.ptr<uchar>(v) : nullptr;
 
       for (int u = 0; u < cols; u += skip_pix)
       {
 
+        // [BB-PATCH-3] 按列索引 u 取深度。原实现为 depth = (*row_ptr++) / k，
+        // 而 u 每轮 += skip_pix：skip_pixel>1 时读到的深度与像素列号错位
+        // （u 处用了第 u/skip_pix 列的深度）。
+        const uint16_t raw_depth = row_ptr[u];
+        // [BB-PATCH-2] 无效观测不产生障碍端点、不沿其射线清图。
+        // 原实现把 0 深度投影到相机原点（距离 0 ⇒ 被判为 hit），在相机原点伪造占据。
+        if (mask_ok ? (mask_ptr[u] != 0) : (raw_depth == 0))
+          continue;
+
         Eigen::Vector3d proj_pt;
-        depth = (*row_ptr++) / mp_.k_depth_scaling_factor_;
+        depth = raw_depth / mp_.k_depth_scaling_factor_;
         proj_pt(0) = (u - mp_.cx_) * depth / mp_.fx_;
         proj_pt(1) = (v - mp_.cy_) * depth / mp_.fy_;
         proj_pt(2) = depth;
@@ -291,6 +394,10 @@ void GridMap::projectDepthImage()
 
         if (u == 320 && v == 240)
           std::cout << "depth: " << depth << std::endl;
+        // [BB-PATCH-3] 容量边界保护：proj_points_ 只按 640x480 预分配，
+        // 更大分辨率或 skip_pixel=1 的其它尺寸会越界写。
+        if (md_.proj_points_cnt >= (int)md_.proj_points_.size())
+          break;
         md_.proj_points_[md_.proj_points_cnt++] = proj_pt;
       }
     }
@@ -311,29 +418,36 @@ void GridMap::projectDepthImage()
 
       for (int v = mp_.depth_filter_margin_; v < rows - mp_.depth_filter_margin_; v += mp_.skip_pixel_)
       {
-        row_ptr = md_.depth_image_.ptr<uint16_t>(v) + mp_.depth_filter_margin_;
+        const uint16_t *row_ptr = md_.depth_image_.ptr<uint16_t>(v);
+        const uchar *mask_ptr = mask_ok ? md_.depth_invalid_mask_.ptr<uchar>(v) : nullptr;
 
         for (int u = mp_.depth_filter_margin_; u < cols - mp_.depth_filter_margin_;
              u += mp_.skip_pixel_)
         {
 
-          depth = (*row_ptr) * inv_factor;
-          row_ptr = row_ptr + mp_.skip_pixel_;
+          // [BB-PATCH-3] 原实现先读 *row_ptr 再 row_ptr += skip_pixel_，随后用推进后的
+          // *row_ptr（即"下一个采样点"）判断是否为 0：判断对象错位，且最后一次迭代会
+          // 读到行尾 margin 之外（越界）。这里统一按列索引 u 取值。
+          const uint16_t raw_depth = row_ptr[u];
+          // [BB-PATCH-2/5] 无效观测不产生端点、不清图。原实现把 *row_ptr == 0
+          // （匹配失败 / 无效深度）当作 mp_.max_ray_length_ + 0.1 的自由空间射线，
+          // 会把射线路径上的真实障碍当作 miss 清除。默认不从匹配失败推断自由空间。
+          if (mask_ok ? (mask_ptr[u] != 0) : (raw_depth == 0))
+            continue;
+
+          depth = raw_depth * inv_factor;
 
           // filter depth
           // depth += rand_noise_(eng_);
           // if (depth > 0.01) depth += rand_noise2_(eng_);
 
-          if (*row_ptr == 0)
-          {
-            depth = mp_.max_ray_length_ + 0.1;
-          }
-          else if (depth < mp_.depth_filter_mindist_)
+          if (depth < mp_.depth_filter_mindist_)
           {
             continue;
           }
           else if (depth > mp_.depth_filter_maxdist_)
           {
+            // [BB-PATCH-5] 经深度滤波验证有效的超量程观测：仍按既有算法延伸到最大量程清空空间
             depth = mp_.max_ray_length_ + 0.1;
           }
 
@@ -347,6 +461,8 @@ void GridMap::projectDepthImage()
           //   pt_world = closetPointInMap(pt_world, md_.camera_pos_);
           // }
 
+          if (md_.proj_points_cnt >= (int)md_.proj_points_.size())
+            break; // [BB-PATCH-3] 容量边界保护（原实现无检查）
           md_.proj_points_[md_.proj_points_cnt++] = pt_world;
 
           // check consistency with last image, disabled...
@@ -373,6 +489,7 @@ void GridMap::projectDepthImage()
       }
     }
   }
+
 
   /* maintain camera pose for consistency check */
 
@@ -737,7 +854,12 @@ void GridMap::updateOccupancyCallback()
   // t3 = ros::Time::now();
 
   if (md_.local_updated_)
+  {
     clearAndInflateLocalMap();
+    // Count completed fusion/inflation, never merely projected input.
+    if (md_.proj_points_cnt > 0)
+      ++md_.depth_fusion_updates_;
+  }
 
   // t4 = ros::Time::now();
 
@@ -761,6 +883,10 @@ void GridMap::depthPoseCallback(const sensor_msgs::msg::Image::ConstPtr &img,
   /* get depth image */
   cv_bridge::CvImagePtr cv_ptr;
   cv_ptr = cv_bridge::toCvCopy(img, img->encoding);
+
+  // [BB-PATCH-1] 必须在 convertTo(CV_16UC1) 之前按原始编码建立无效掩码：
+  // NaN / 负值会被 OpenCV 静默饱和成 0，转换后再判断已无法区分"无效"与"0 米"。
+  buildDepthInvalidMask(cv_ptr->image);
 
   if (img->encoding == sensor_msgs::image_encodings::TYPE_32FC1)
   {
@@ -793,7 +919,13 @@ void GridMap::depthPoseCallback(const sensor_msgs::msg::Image::ConstPtr &img,
 
 void GridMap::odomCallback(const nav_msgs::msg::Odometry::SharedPtr odom)
 {
-  if (md_.has_first_depth_)
+  // [BB-PATCH-4] 独立里程计（grid_map/odom）只用于尚未获得有效深度观测时预置 camera_pos_
+  // （例如 depthOdomCallback 之外的回退路径）。
+  // 旧实现判断的是 md_.has_first_depth_，而该标志只在 use_depth_filter=true 的投影分支里置位：
+  // use_depth_filter=false 时它恒为 false，于是每条 odom 都会覆盖 depthPoseCallback 刚写入的
+  // 相机位姿，使 0.05s 定时器用"上一帧位姿 + 本帧深度"投影，产生位置错误的障碍。
+  // 这里改用明确的"是否已有有效深度观测"语义，且不依赖 has_first_depth_。
+  if (md_.has_valid_depth_obs_)
     return;
 
   md_.camera_pos_(0) = odom->pose.pose.position.x;
@@ -1015,7 +1147,27 @@ void GridMap::publishMapInflate(bool all_info)
 
 bool GridMap::odomValid() { return md_.has_odom_; }
 
-bool GridMap::hasDepthObservation() { return md_.has_first_depth_; }
+// A newly observed obstacle starts at the unknown prior and requires strictly
+// more than min_occupancy_log_ to become occupied. A configured warm-up shorter
+// than that number of hits must not expose an apparently empty map to planning.
+// This is a startup floor, not a guarantee that every voxel has been observed.
+bool GridMap::mapReady(int min_fusion_updates)
+{
+  if (!std::isfinite(mp_.prob_hit_log_) || mp_.prob_hit_log_ <= 0.0)
+    return false;
+  const int hits_to_occupancy = static_cast<int>(std::floor(
+      (mp_.min_occupancy_log_ - mp_.clamp_min_log_ + mp_.unknown_flag_) /
+      mp_.prob_hit_log_)) + 1;
+  return md_.has_valid_depth_obs_ &&
+         md_.depth_fusion_updates_ >= std::max(min_fusion_updates, hits_to_occupancy);
+}
+
+bool GridMap::hasDepthObservation()
+{
+  // [BB-PATCH-4] 语义修正：原实现返回 has_first_depth_，而它只在 use_depth_filter=true 的
+  // 过滤分支里被置位；现在返回"是否已收到有效深度观测"，对两个分支都成立。
+  return md_.has_valid_depth_obs_;
+}
 
 Eigen::Vector3d GridMap::getOrigin() { return mp_.map_origin_; }
 
@@ -1067,6 +1219,10 @@ void GridMap::depthOdomCallback(const sensor_msgs::msg::Image::ConstPtr &img,
   /* get depth image */
   cv_bridge::CvImagePtr cv_ptr;
   cv_ptr = cv_bridge::toCvCopy(img, img->encoding);
+
+  // [BB-PATCH-1] 同 depthPoseCallback：转换前建立无效掩码
+  buildDepthInvalidMask(cv_ptr->image);
+
   if (img->encoding == sensor_msgs::image_encodings::TYPE_32FC1)
   {
     (cv_ptr->image).convertTo(cv_ptr->image, CV_16UC1, mp_.k_depth_scaling_factor_);

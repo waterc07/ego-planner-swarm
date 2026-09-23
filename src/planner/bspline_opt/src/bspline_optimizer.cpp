@@ -19,6 +19,7 @@ namespace ego_planner
     node->declare_parameter("optimization/max_acc", -1.0);
 
     node->declare_parameter("optimization/order", 3);
+    node->declare_parameter("optimization/full_path_collision_check", false);
 
     node->get_parameter("optimization/lambda_smooth", lambda1_);
     node->get_parameter("optimization/lambda_collision", lambda2_);
@@ -31,6 +32,7 @@ namespace ego_planner
     node->get_parameter("optimization/max_acc", max_acc_);
 
     node->get_parameter("optimization/order", order_);
+    node->get_parameter("optimization/full_path_collision_check", full_path_collision_check_);
   }
 
   void BsplineOptimizer::setEnvironment(const GridMap::Ptr &map)
@@ -501,7 +503,8 @@ namespace ego_planner
     bool occ, last_occ = false;
     // 标识片段的起点和终点是否找到
     bool flag_got_start = false, flag_got_end = false, flag_got_end_maybe = false;
-    int i_end = (int)init_points.cols() - order_ - ((int)init_points.cols() - 2 * order_) / 3; // only check closed 2/3 points.
+    int i_end = (int)init_points.cols() - order_ -
+      (full_path_collision_check_ ? 0 : ((int)init_points.cols() - 2 * order_) / 3); // offline option checks the full path.
     // 遍历所有点
     for (int i = order_; i <= i_end; ++i)
     {
@@ -1304,7 +1307,7 @@ namespace ego_planner
     int in_id, out_id;
     vector<std::pair<int, int>> segment_ids;
     bool flag_new_obs_valid = false;
-    int i_end = end_idx - (end_idx - order_) / 3;
+    int i_end = end_idx - (full_path_collision_check_ ? 0 : (end_idx - order_) / 3);
     for (int i = order_ - 1; i <= i_end; ++i)
     {
 
@@ -1613,8 +1616,8 @@ namespace ego_planner
         traj.getTimeSpan(tm, tmp);
         // 计算时间步长
         double t_step = (tmp - tm) / ((traj.evaluateDeBoorT(tmp) - traj.evaluateDeBoorT(tm)).norm() / grid_map_->getResolution());
-        // 遍历轨迹的前2/3部分进行障碍物检测
-        for (double t = tm; t < tmp * 2 / 3; t += t_step) // Only check the closest 2/3 partition of the whole trajectory.
+        // 根据配置检测前 2/3 或完整轨迹
+        for (double t = tm; t < tmp * (full_path_collision_check_ ? 1.0 : 2.0 / 3.0); t += t_step) // Offline option checks the whole trajectory.
         {
           flag_occ = grid_map_->getInflateOccupancy(traj.evaluateDeBoorT(t));
           if (flag_occ)
@@ -1764,7 +1767,7 @@ namespace ego_planner
       double tm, tmp;
       traj.getTimeSpan(tm, tmp);
       double t_step = (tmp - tm) / ((traj.evaluateDeBoorT(tmp) - traj.evaluateDeBoorT(tm)).norm() / grid_map_->getResolution()); // Step size is defined as the maximum size that can passes throgth every gird.
-      for (double t = tm; t < tmp * 2 / 3; t += t_step)
+      for (double t = tm; t < tmp * (full_path_collision_check_ ? 1.0 : 2.0 / 3.0); t += t_step)
       {
         if (grid_map_->getInflateOccupancy(traj.evaluateDeBoorT(t)))
         {

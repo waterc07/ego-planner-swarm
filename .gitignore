@@ -19,3 +19,10 @@ log/
 __pycache__/
 *.pyc
 
+
+# Boom_Birds local run outputs; keep evidence off new commits
+*.log
+*.bag
+*.db3
+*.mcap
+*.jsonl
