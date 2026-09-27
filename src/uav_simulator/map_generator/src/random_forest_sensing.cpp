@@ -411,6 +411,9 @@ int main(int argc, char **argv)
     node->declare_parameter("map/x_size", 50.0);
     node->declare_parameter("map/y_size", 50.0);
     node->declare_parameter("map/z_size", 5.0);
+    node->declare_parameter("map/center_x", 0.0);
+    node->declare_parameter("map/center_y", 0.0);
+    node->declare_parameter("map/seed", -1);
     node->declare_parameter("map/obs_num", 30);
     node->declare_parameter("map/resolution", 0.1);
     node->declare_parameter("map/circle_num", 30);
@@ -455,18 +458,20 @@ int main(int argc, char **argv)
     node->get_parameter("min_distance", _min_dist);
 
     // 地图边界和障碍物的设置
-    _x_l = -_x_size / 2.0;
-    _x_h = +_x_size / 2.0;
-    _y_l = -_y_size / 2.0;
-    _y_h = +_y_size / 2.0;
+    const double center_x = node->get_parameter("map/center_x").as_double();
+    const double center_y = node->get_parameter("map/center_y").as_double();
+    _x_l = center_x - _x_size / 2.0;
+    _x_h = center_x + _x_size / 2.0;
+    _y_l = center_y - _y_size / 2.0;
+    _y_h = center_y + _y_size / 2.0;
     _obs_num = std::min(_obs_num, static_cast<int>(_x_size * 10));
     _z_limit = _z_size;
 
     rclcpp::sleep_for(std::chrono::milliseconds(500));
 
     // 初始化随机数生成器
-    unsigned int seed = rd();
-    // unsigned int seed = 2433201515;
+    const int configured_seed = node->get_parameter("map/seed").as_int();
+    unsigned int seed = configured_seed >= 0 ? static_cast<unsigned int>(configured_seed) : rd();
     std::cout << "seed=" << seed << std::endl;
     eng.seed(seed);
 

@@ -48,6 +48,7 @@ def generate_launch_description():
 
     args = [
         DeclareLaunchArgument("ready_min_fusion_updates", default_value="5"),
+        DeclareLaunchArgument("position_cmd_topic", default_value="/boom_birds/ego/position_cmd"),
         DeclareLaunchArgument("drone_id", default_value="0"),
         DeclareLaunchArgument("map_size_x", default_value="40.0"),
         DeclareLaunchArgument("map_size_y", default_value="40.0"),
@@ -128,7 +129,7 @@ def generate_launch_description():
             {"grid_map/min_ray_length": 0.1},
             {"grid_map/max_ray_length": max_ray_length},
             {"grid_map/virtual_ceil_height": 2.9},
-            {"grid_map/visualization_truncate_height": 1.8},
+            {"grid_map/visualization_truncate_height": 3.6},
             {"grid_map/show_occ_time": False},
             {"grid_map/pose_type": 1},
             {"grid_map/frame_id": "global"},
@@ -166,7 +167,7 @@ def generate_launch_description():
         output="screen",
         remappings=[
             ("planning/bspline", "/boom_birds/ego/planning/bspline"),
-            ("/position_cmd", "/boom_birds/ego/position_cmd"),
+            ("/position_cmd", LaunchConfiguration("position_cmd_topic")),
         ],
         parameters=[{"traj_server/time_forward": 1.0}],
     )
