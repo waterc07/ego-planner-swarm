@@ -7,6 +7,12 @@ void GridMap::initMap(rclcpp::Node::SharedPtr node)
 {
   node_ = node;
 
+  node_->declare_parameter("grid_map/depth_pose_tolerance_s", 0.03);
+  node_->get_parameter("grid_map/depth_pose_tolerance_s", depth_pose_tolerance_s_);
+  if (!std::isfinite(depth_pose_tolerance_s_) || depth_pose_tolerance_s_ <= 0)
+    throw std::invalid_argument("grid_map/depth_pose_tolerance_s");
+  use_camera_info_ = node_->declare_parameter("grid_map/use_camera_info", false);
+
   /* get parameter */
   double x_size, y_size, z_size;
   node_->declare_parameter("grid_map/resolution", -1.0);
@@ -59,6 +65,26 @@ void GridMap::initMap(rclcpp::Node::SharedPtr node)
   node_->get_parameter("grid_map/fy", mp_.fy_);
   node_->get_parameter("grid_map/cx", mp_.cx_);
   node_->get_parameter("grid_map/cy", mp_.cy_);
+  // [BB-A3] 内参来源必须**显式**二选一，两条路径都不允许静默回退：
+  //   use_camera_info=true  → 只认 CameraInfo；任何静态内参都是"兜底"，直接拒绝；
+  //   use_camera_info=false → 静态模式，必须显式给出合法 fx/fy/cx/cy，不允许用默认 -1 继续建图。
+  {
+    const bool static_given =
+        (mp_.fx_ != -1.0 || mp_.fy_ != -1.0 || mp_.cx_ != -1.0 || mp_.cy_ != -1.0);
+    if (use_camera_info_ && static_given)
+      throw std::invalid_argument(
+          "[BB-A3] grid_map/use_camera_info=true 与静态内参同时给出：CameraInfo 与静态内参互斥");
+    if (!use_camera_info_)
+    {
+      const bool static_ok = std::isfinite(mp_.fx_) && std::isfinite(mp_.fy_) &&
+                             std::isfinite(mp_.cx_) && std::isfinite(mp_.cy_) && mp_.fx_ > 0.0 &&
+                             mp_.fy_ > 0.0 && mp_.cx_ >= 0.0 && mp_.cy_ >= 0.0;
+      if (!static_ok)
+        throw std::invalid_argument(
+            "[BB-A3] 静态内参模式必须显式给出 grid_map/{fx,fy,cx,cy}（fx,fy>0，cx,cy>=0）；"
+            "缺失或非法时拒绝按默认值建图");
+    }
+  }
   node_->get_parameter("grid_map/use_depth_filter", mp_.use_depth_filter_);
   node_->get_parameter("grid_map/depth_filter_tolerance", mp_.depth_filter_tolerance_);
   node_->get_parameter("grid_map/depth_filter_maxdist", mp_.depth_filter_maxdist_);
@@ -162,25 +188,49 @@ void GridMap::initMap(rclcpp::Node::SharedPtr node)
       "/vins_estimator/extrinsic", 10,
       std::bind(&GridMap::extrinsicCallback, this, std::placeholders::_1));
 
+  if (use_camera_info_) {
+    info_sub_ = std::make_shared<message_filters::Subscriber<sensor_msgs::msg::CameraInfo>>(
+        node_, "grid_map/camera_info", rclcpp::QoS(50).get_rmw_qos_profile());
+    info_sub_->registerCallback(std::bind(&GridMap::cameraInfoCallback, this, std::placeholders::_1));
+    // [BB-A3] 显式重建触发。几何闭锁不会被任何自动路径解除：必须由外部在确认新标定 /
+    // 新输出尺寸后，主动发一条消息；之后仍必须显式重新规划（见几何代次）。
+    geometry_reset_sub_ = node_->create_subscription<std_msgs::msg::Empty>(
+        "grid_map/geometry_reset", 10,
+        std::bind(&GridMap::geometryResetCallback, this, std::placeholders::_1));
+  }
   if (mp_.pose_type_ == POSE_STAMPED)
   {
     pose_sub_ = std::make_shared<message_filters::Subscriber<geometry_msgs::msg::PoseStamped>>(
         node_, "grid_map/pose", rclcpp::QoS(25).get_rmw_qos_profile());
 
-    sync_image_pose_ = std::make_shared<message_filters::Synchronizer<SyncPolicyImagePose>>(
-        SyncPolicyImagePose(100), *depth_sub_, *pose_sub_);
-    sync_image_pose_->registerCallback(
-        std::bind(&GridMap::depthPoseCallback, this, std::placeholders::_1, std::placeholders::_2));
+    if (use_camera_info_) {
+      info_pose_sync_ = std::make_shared<message_filters::Synchronizer<SyncInfoPose>>(
+          SyncInfoPose(50), *depth_sub_, *pose_sub_, *info_sub_);
+      info_pose_sync_->setMaxIntervalDuration(rclcpp::Duration::from_seconds(depth_pose_tolerance_s_));
+      info_pose_sync_->registerCallback(&GridMap::depthInfoPoseCallback, this);
+    } else {
+      sync_image_pose_ = std::make_shared<message_filters::Synchronizer<SyncPolicyImagePose>>(
+          SyncPolicyImagePose(100), *depth_sub_, *pose_sub_);
+      sync_image_pose_->registerCallback(
+          std::bind(&GridMap::depthPoseCallback, this, std::placeholders::_1, std::placeholders::_2));
+    }
   }
   else if (mp_.pose_type_ == ODOMETRY)
   {
     odom_sub_ = std::make_shared<message_filters::Subscriber<nav_msgs::msg::Odometry>>(
         node_, "grid_map/odom", rclcpp::QoS(100).get_rmw_qos_profile());
 
-    sync_image_odom_ = std::make_shared<message_filters::Synchronizer<SyncPolicyImageOdom>>(
-        SyncPolicyImageOdom(100), *depth_sub_, *odom_sub_);
-    sync_image_odom_->registerCallback(
-        std::bind(&GridMap::depthOdomCallback, this, std::placeholders::_1, std::placeholders::_2));
+    if (use_camera_info_) {
+      info_odom_sync_ = std::make_shared<message_filters::Synchronizer<SyncInfoOdom>>(
+          SyncInfoOdom(50), *depth_sub_, *odom_sub_, *info_sub_);
+      info_odom_sync_->setMaxIntervalDuration(rclcpp::Duration::from_seconds(depth_pose_tolerance_s_));
+      info_odom_sync_->registerCallback(&GridMap::depthInfoOdomCallback, this);
+    } else {
+      sync_image_odom_ = std::make_shared<message_filters::Synchronizer<SyncPolicyImageOdom>>(
+          SyncPolicyImageOdom(100), *depth_sub_, *odom_sub_);
+      sync_image_odom_->registerCallback(
+          std::bind(&GridMap::depthOdomCallback, this, std::placeholders::_1, std::placeholders::_2));
+    }
   }
 
   // 使用独立的里程计和点云订阅
@@ -225,6 +275,281 @@ void GridMap::initMap(rclcpp::Node::SharedPtr node)
   // rand_noise2_ = normal_distribution<double>(0, 0.2);
   // random_device rd;
   // eng_ = default_random_engine(rd());
+}
+
+
+// [BB-A3] 一份 CameraInfo 只有满足全部条件才可作为深度反投影的唯一几何来源。
+// 这里刻意不接受"大部分字段看起来合理"的矩阵：P 是 (u,v,depth) → 3D 的唯一依据，
+// 任何一项不成立都会让整幅地图的尺度或方向错掉，因此一律拒绝并诊断。
+bool GridMap::validateCameraInfo(const sensor_msgs::msg::CameraInfo &info, std::string &reason)
+{
+  if (info.width <= 0 || info.height <= 0)
+  {
+    reason = "尺寸非正";
+    return false;
+  }
+  if (info.header.frame_id.empty())
+  {
+    reason = "光学帧为空";
+    return false;
+  }
+  if (info.p.size() != 12)
+  {
+    reason = "P 长度不为 12";
+    return false;
+  }
+  for (size_t i = 0; i < info.p.size(); ++i)
+  {
+    if (!std::isfinite(info.p[i]))
+    {
+      reason = "P[" + std::to_string(i) + "] 非有限值";
+      return false;
+    }
+  }
+  if (!(info.p[0] > 0.0) || !(info.p[5] > 0.0))
+  {
+    reason = "fx/fy 非正";
+    return false;
+  }
+  if (info.p[1] != 0.0 || info.p[4] != 0.0 || info.p[7] != 0.0 || info.p[11] != 0.0)
+  {
+    reason = "P 含倾斜项或非零齐次项 P[11]";
+    return false;
+  }
+  if (info.p[10] != 1.0)
+  {
+    reason = "P[10] 不为 1";
+    return false;
+  }
+  if (info.p[2] < 0.0 || info.p[2] >= static_cast<double>(info.width) || info.p[6] < 0.0 ||
+      info.p[6] >= static_cast<double>(info.height))
+  {
+    reason = "主点落在图像外";
+    return false;
+  }
+  // 深度图必须是**校正后左目**：P[0][3] != 0 说明这是右目（或带基线项）的投影矩阵，
+  // grid_map 的 (u-cx)*z/fx 反投影会整体偏掉一个基线，必须拒绝而不是静默使用。
+  if (info.p[3] != 0.0)
+  {
+    reason = "深度图 CameraInfo 不是左目（P[0][3] != 0）";
+    return false;
+  }
+  return true;
+}
+
+bool GridMap::sameCameraGeometry(const sensor_msgs::msg::CameraInfo &a,
+                                 const sensor_msgs::msg::CameraInfo &b)
+{
+  return a.width == b.width && a.height == b.height && a.header.frame_id == b.header.frame_id &&
+         a.p == b.p;
+}
+
+void GridMap::rejectCameraGeometry(const std::string &reason)
+{
+  geometry_reject_reason_ = reason;
+  ++geometry_reject_count_;
+  if (reason != geometry_reject_logged_)
+  {
+    geometry_reject_logged_ = reason;
+    RCLCPP_ERROR(node_->get_logger(), "[BB-A3] 拒绝相机几何：%s", reason.c_str());
+  }
+}
+
+// 把地图退回"全部未知"：闭锁与重建都必须保证旧占据体素不残留。
+void GridMap::clearMapForGeometryChange()
+{
+  std::fill(md_.occupancy_buffer_.begin(), md_.occupancy_buffer_.end(),
+            mp_.clamp_min_log_ - mp_.unknown_flag_);
+  std::fill(md_.occupancy_buffer_inflate_.begin(), md_.occupancy_buffer_inflate_.end(), 0);
+  // 上一代几何算出的深度缓存不得留到下一代的第一次融合之前
+  md_.depth_image_ = cv::Mat();
+  md_.last_depth_image_ = cv::Mat();
+  md_.depth_invalid_mask_ = cv::Mat();
+  // 注意：proj_points_ 是 initMap 预分配的**定长**缓冲（640*480/skip²），
+  // projectDepthImage 写入前有容量保护（cnt >= size() 就整帧跳过）。
+  // 这里只能把计数归零，**不能** clear()：清空后 size()==0，重建后第一帧起
+  // 每帧都会被容量保护跳过，地图再也建不起来（S8 回归用例锁定了这条路径）。
+  md_.proj_points_cnt = 0;
+  md_.image_cnt_ = 0;
+  md_.has_first_depth_ = false;
+  md_.has_valid_depth_obs_ = false;
+  md_.occ_need_update_ = false;
+  md_.local_updated_ = false;
+  md_.flag_use_depth_fusion = false;
+  md_.flag_depth_odom_timeout_ = false;
+  md_.depth_fusion_updates_ = 0;
+  md_.update_num_ = 0;
+  md_.last_occ_update_time_ = rclcpp::Time(0, 0, RCL_SYSTEM_TIME);
+  std::fill(md_.count_hit_.begin(), md_.count_hit_.end(), 0);
+  std::fill(md_.count_hit_and_miss_.begin(), md_.count_hit_and_miss_.end(), 0);
+  std::fill(md_.flag_traverse_.begin(), md_.flag_traverse_.end(), -1);
+  std::fill(md_.flag_rayend_.begin(), md_.flag_rayend_.end(), -1);
+  while (!md_.cache_voxel_.empty())
+    md_.cache_voxel_.pop();
+}
+
+void GridMap::latchCameraGeometryFault(const std::string &reason)
+{
+  if (!geometry_fault_)
+    RCLCPP_ERROR(node_->get_logger(),
+                 "[BB-A3] 相机几何变化/非法：地图与轨迹作废，必须显式重建后再规划（原因：%s）",
+                 reason.c_str());
+  geometry_fault_ = true;
+  rejectCameraGeometry(reason);
+  clearMapForGeometryChange();
+}
+
+void GridMap::cameraInfoCallback(sensor_msgs::msg::CameraInfo::ConstSharedPtr info)
+{
+  if (!use_camera_info_)
+    return;
+
+  std::string reason;
+  if (!validateCameraInfo(*info, reason))
+  {
+    // 已经在用某份几何（或已闭锁）时收到非法消息：闭锁，绝不"忽略后继续用旧的"
+    if (camera_info_ || geometry_fault_)
+      latchCameraGeometryFault(reason);
+    else
+      rejectCameraGeometry(reason);
+    return;
+  }
+
+  if (geometry_fault_)
+  {
+    // 闭锁期间只记录"候选新几何"，绝不自动采纳；解除只能靠 grid_map/geometry_reset
+    if (pending_camera_info_ && sameCameraGeometry(*pending_camera_info_, *info))
+      return;
+    if (pending_camera_info_)
+      RCLCPP_WARN(node_->get_logger(), "[BB-A3] 重建候选几何再次变化，改用最新一份作为候选");
+    pending_camera_info_ = info;
+    return;
+  }
+
+  if (!camera_info_)
+  {
+    camera_info_ = info;  // 首次建立几何：在此之前 mapReady() 必须为 false
+  }
+  else if (!sameCameraGeometry(*camera_info_, *info))
+  {
+    const bool frame_changed = info->header.frame_id != camera_info_->header.frame_id;
+    pending_camera_info_ = info;
+    latchCameraGeometryFault(frame_changed ? "光学帧变化" : "内参或尺寸变化");
+    return;
+  }
+  else
+  {
+    camera_info_ = info;  // 同一几何的新时间戳：只刷新时间戳，不改几何
+  }
+
+  mp_.fx_ = info->p[0];
+  mp_.fy_ = info->p[5];
+  mp_.cx_ = info->p[2];
+  mp_.cy_ = info->p[6];
+}
+
+void GridMap::geometryResetCallback(const std_msgs::msg::Empty::SharedPtr)
+{
+  if (!use_camera_info_ || !geometry_fault_)
+    return;
+  if (!pending_camera_info_)
+  {
+    rejectCameraGeometry("重建请求时仍无自洽的新 CameraInfo");
+    return;
+  }
+  std::string reason;
+  if (!validateCameraInfo(*pending_camera_info_, reason))
+  {
+    rejectCameraGeometry(reason);
+    return;
+  }
+  camera_info_ = pending_camera_info_;
+  pending_camera_info_.reset();
+  mp_.fx_ = camera_info_->p[0];
+  mp_.fy_ = camera_info_->p[5];
+  mp_.cx_ = camera_info_->p[2];
+  mp_.cy_ = camera_info_->p[6];
+  clearMapForGeometryChange();
+  // 早于本次切换的深度帧属于上一代几何，即使尺寸/帧名碰巧相同也不得进入新地图
+  geometry_epoch_ = rclcpp::Time(camera_info_->header.stamp);
+  geometry_fault_ = false;
+  ++geometry_generation_;
+  RCLCPP_WARN(node_->get_logger(),
+              "[BB-A3] 已按新几何重建空地图（代次 %d，%dx%d，frame=%s）；必须显式重新规划",
+              geometry_generation_, camera_info_->width, camera_info_->height,
+              camera_info_->header.frame_id.c_str());
+}
+
+bool GridMap::rebuildCameraGeometry(const sensor_msgs::msg::CameraInfo &info,
+                                    const sensor_msgs::msg::Image &image, std::string &reason)
+{
+  if (!use_camera_info_)
+  {
+    reason = "非 CameraInfo 模式没有几何闭锁";
+    return false;
+  }
+  if (!geometry_fault_)
+  {
+    reason = "当前没有几何闭锁";
+    return false;
+  }
+  if (!validateCameraInfo(info, reason))
+    return false;
+  if (image.width != info.width || image.height != info.height)
+  {
+    reason = "重建用深度图尺寸与 CameraInfo 不一致";
+    return false;
+  }
+  if (image.header.frame_id != info.header.frame_id)
+  {
+    reason = "重建用深度图光学帧与 CameraInfo 不一致";
+    return false;
+  }
+  camera_info_ = std::make_shared<sensor_msgs::msg::CameraInfo>(info);
+  pending_camera_info_.reset();
+  mp_.fx_ = info.p[0];
+  mp_.fy_ = info.p[5];
+  mp_.cx_ = info.p[2];
+  mp_.cy_ = info.p[6];
+  clearMapForGeometryChange();
+  geometry_epoch_ = rclcpp::Time(info.header.stamp);
+  geometry_fault_ = false;
+  ++geometry_generation_;
+  reason.clear();
+  return true;
+}
+
+bool GridMap::imageGeometryValid(const sensor_msgs::msg::Image &image)
+{
+  if (!use_camera_info_)
+    return true;
+  if (!camera_info_)
+  {
+    rejectCameraGeometry("深度先到但尚无 CameraInfo：未就绪，不融合");
+    return false;
+  }
+  if (geometry_fault_)
+    return false;  // 已闭锁：不再按帧重复计数
+
+  const double img_stamp = rclcpp::Time(image.header.stamp).seconds();
+  const double info_stamp = rclcpp::Time(camera_info_->header.stamp).seconds();
+  const double age = node_->now().seconds() - img_stamp;
+  std::string reason;
+  if (!std::isfinite(age) || age < -0.03 || age > mp_.odom_depth_timeout_)
+    reason = "深度帧时间戳过期或来自未来";
+  else if (geometry_epoch_.seconds() > 0.0 && img_stamp < geometry_epoch_.seconds() - 0.03)
+    reason = "深度帧早于几何切换时刻（上一代几何）";
+  else if (std::abs(img_stamp - info_stamp) > 0.03)
+    reason = "深度帧与 CameraInfo 不是同一次输出";
+  else if (image.width != camera_info_->width || image.height != camera_info_->height)
+    reason = "深度图尺寸与 CameraInfo 不一致";
+  else if (image.header.frame_id != camera_info_->header.frame_id)
+    reason = "光学帧与 CameraInfo 不一致";
+
+  if (reason.empty())
+    return true;
+  rejectCameraGeometry(reason);
+  return false;
 }
 
 void GridMap::resetBuffer()
@@ -825,6 +1150,7 @@ void GridMap::visCallback()
 
 void GridMap::updateOccupancyCallback()
 {
+  if (geometry_fault_) return;
   if (md_.last_occ_update_time_.seconds() < 1.0)
     md_.last_occ_update_time_ = node_->now();
 
@@ -842,8 +1168,6 @@ void GridMap::updateOccupancyCallback()
     }
     return;
   }
-  md_.last_occ_update_time_ = node_->now();
-
   /* update occupancy */
   // ros::Time t1, t2, t3, t4;
   // t1 = ros::Time::now();
@@ -858,7 +1182,12 @@ void GridMap::updateOccupancyCallback()
     clearAndInflateLocalMap();
     // Count completed fusion/inflation, never merely projected input.
     if (md_.proj_points_cnt > 0)
+    {
       ++md_.depth_fusion_updates_;
+      // A timeout ends only after a new depth frame has contributed to the map.
+      md_.last_occ_update_time_ = node_->now();
+      md_.flag_depth_odom_timeout_ = false;
+    }
   }
 
   // t4 = ros::Time::now();
@@ -880,6 +1209,8 @@ void GridMap::updateOccupancyCallback()
 void GridMap::depthPoseCallback(const sensor_msgs::msg::Image::ConstPtr &img,
                                 const geometry_msgs::msg::PoseStamped::ConstPtr &pose)
 {
+  if (!imageGeometryValid(*img)) return;
+  if (use_camera_info_ && std::abs((rclcpp::Time(img->header.stamp) - rclcpp::Time(pose->header.stamp)).seconds()) > depth_pose_tolerance_s_) return;
   /* get depth image */
   cv_bridge::CvImagePtr cv_ptr;
   cv_ptr = cv_bridge::toCvCopy(img, img->encoding);
@@ -937,6 +1268,8 @@ void GridMap::odomCallback(const nav_msgs::msg::Odometry::SharedPtr odom)
 
 void GridMap::cloudCallback(const sensor_msgs::msg::PointCloud2::ConstPtr &img)
 {
+  if (use_camera_info_) return;  // CameraInfo mode only accepts synchronized depth.
+
 
   pcl::PointCloud<pcl::PointXYZ> latest_cloud;
   pcl::fromROSMsg(*img, latest_cloud);
@@ -1153,6 +1486,14 @@ bool GridMap::odomValid() { return md_.has_odom_; }
 // This is a startup floor, not a guarantee that every voxel has been observed.
 bool GridMap::mapReady(int min_fusion_updates)
 {
+  if (use_camera_info_) {
+    if (geometry_fault_ || !camera_info_) return false;
+    const double age = node_->now().seconds() - rclcpp::Time(camera_info_->header.stamp).seconds();
+    if (age < -0.03 || age > mp_.odom_depth_timeout_) return false;
+    if (!md_.has_valid_depth_obs_ || md_.last_occ_update_time_.seconds() <= 0.0) return false;
+    const double fusion_age = node_->now().seconds() - md_.last_occ_update_time_.seconds();
+    if (fusion_age < -0.03 || fusion_age > mp_.odom_depth_timeout_) return false;
+  }
   if (!std::isfinite(mp_.prob_hit_log_) || mp_.prob_hit_log_ <= 0.0)
     return false;
   const int hits_to_occupancy = static_cast<int>(std::floor(
@@ -1197,6 +1538,8 @@ void GridMap::extrinsicCallback(const nav_msgs::msg::Odometry::ConstPtr &odom)
 void GridMap::depthOdomCallback(const sensor_msgs::msg::Image::ConstPtr &img,
                                 const nav_msgs::msg::Odometry::ConstPtr &odom)
 {
+  if (!imageGeometryValid(*img)) return;
+  if (use_camera_info_ && std::abs((rclcpp::Time(img->header.stamp) - rclcpp::Time(odom->header.stamp)).seconds()) > depth_pose_tolerance_s_) return;
   /* get pose */
   Eigen::Quaterniond body_q = Eigen::Quaterniond(odom->pose.pose.orientation.w,
                                                  odom->pose.pose.orientation.x,

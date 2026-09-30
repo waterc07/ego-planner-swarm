@@ -40,9 +40,12 @@ public:
 	}
 };
 
+#include <chrono>
+
 class AStar
 {
 private:
+	std::chrono::steady_clock::time_point deadline_{std::chrono::steady_clock::time_point::max()};
 	GridMap::Ptr grid_map_;
 
 	inline void coord2gridIndexFast(const double x, const double y, const double z, int &id_x, int &id_y, int &id_z);
@@ -76,6 +79,12 @@ private:
 	int rounds_{0};
 
 public:
+    void beginBudget(double seconds) {
+        deadline_ = seconds > 0 ? std::chrono::steady_clock::now() +
+            std::chrono::duration_cast<std::chrono::steady_clock::duration>(std::chrono::duration<double>(seconds))
+            : std::chrono::steady_clock::time_point::max();
+    }
+    bool budgetExpired() const { return std::chrono::steady_clock::now() >= deadline_; }
 	typedef std::shared_ptr<AStar> Ptr;
 
 	AStar(){};

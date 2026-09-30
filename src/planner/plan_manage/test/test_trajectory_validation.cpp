@@ -1,4 +1,5 @@
 #include "ego_planner/trajectory_validation.h"
+#include "ego_planner/local_target.h"
 #include <iostream>
 #include <stdexcept>
 using namespace ego_planner;
@@ -6,6 +7,18 @@ void require(bool ok, const char* message) {
   if (!ok) throw std::runtime_error(message);
 }
 int main() {
+  const Eigen::Vector3d start(0,0,1), desired(3,0,1), goal(10,0,1);
+  const auto empty = [](const Eigen::Vector3d&) { return true; };
+  auto target = selectLocalTarget(start, desired, goal, 1.5, 0.2, empty);
+  require(target && (*target - desired).norm() == 0, "free nominal target changed");
+  const auto occupied = [&desired](const Eigen::Vector3d& p) { return (p - desired).norm() > 0.8; };
+  target = selectLocalTarget(start, desired, goal, 1.5, 0.2, occupied);
+  require(target && occupied(*target) && (*target - desired).norm() <= 1.5 &&
+          (goal - *target).norm() < (goal - start).norm(), "local target did not avoid occupied endpoint");
+  require(!selectLocalTarget(start, desired, desired, 1.5, 0.2, occupied), "final goal silently moved");
+  require(!selectLocalTarget(start, desired, goal, 1.5, 0.2,
+                             [](const Eigen::Vector3d&) { return false; }), "fully occupied map accepted");
+  require(!selectLocalTarget(start, desired, goal, 1.5, 0.0001, empty), "unbounded target search accepted");
   int repaired=0, checked=0;
   require(validateWithRepairs(3, [&]{++checked; return repaired==3;},
                              [&]{++repaired; return true;}), "last repair not checked");
@@ -33,6 +46,17 @@ int main() {
             "time dilation changed geometric path");
   }
   require(!dilateCubicTime(stretched, 0.5), "unsafe speed-up accepted");
+  auto moving = curve;
+  const auto initial_velocity = curve.getDerivative().evaluateDeBoorT(0.0);
+  require(!dilateWithStartVelocity(moving, 2.0, initial_velocity, 0.3),
+          "dilation bypassed velocity continuity");
+  require(std::abs(moving.getTimeSum() - curve.getTimeSum()) < 1e-10,
+          "failed dilation mutated candidate");
+  require(dilateWithStartVelocity(moving, 1.1, initial_velocity, 0.3),
+          "bounded moving-start dilation rejected");
+  require((moving.getDerivative().evaluateDeBoorT(0.0) - initial_velocity).norm() <= 0.3,
+          "moving start exceeded handoff tolerance");
+
   auto vel=curve.getDerivative();
   for(int i=0;i<=1000;++i)
     require(vel.evaluateDeBoorT(curve.getTimeSum()*i/1000.).norm()<=bounds.velocity+1e-10,

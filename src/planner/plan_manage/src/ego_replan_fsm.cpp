@@ -1,3 +1,5 @@
+#include "ego_planner/process_session.h"
+#include "ego_planner/local_target.h"
 
 #include <ego_planner/ego_replan_fsm.h>
 
@@ -7,6 +9,17 @@ namespace ego_planner
   void EGOReplanFSM::init(rclcpp::Node::SharedPtr &node)
   {
     node_ = node;
+    require_session_ = node_->declare_parameter("project/require_session", false);
+    project_world_frame_ = node_->declare_parameter("project/world_frame", std::string("global"));
+    local_target_search_radius_m_ = node_->declare_parameter("project/local_target_search_radius_m", 1.5);
+    local_target_search_step_m_ = node_->declare_parameter("project/local_target_search_step_m", 0.2);
+    if (!std::isfinite(local_target_search_radius_m_) || !std::isfinite(local_target_search_step_m_) ||
+        local_target_search_step_m_ <= 0 || local_target_search_radius_m_ < local_target_search_step_m_ ||
+        local_target_search_radius_m_ / local_target_search_step_m_ > 100) throw std::invalid_argument("local target search parameters");
+    authorization_timeout_s_ = node_->declare_parameter("project/authorization_timeout_s", 0.2);
+    future_tolerance_s_ = node_->declare_parameter("project/future_tolerance_s", 0.03);
+    if (project_world_frame_.empty() || !std::isfinite(authorization_timeout_s_) || authorization_timeout_s_ <= 0 ||
+        !std::isfinite(future_tolerance_s_) || future_tolerance_s_ <= 0) throw std::invalid_argument("project protocol parameters");
     
     current_wp_ = 0;
     exec_state_ = FSM_EXEC_STATE::INIT;
@@ -115,7 +128,27 @@ namespace ego_planner
     bspline_pub_ = node_->create_publisher<traj_utils::msg::Bspline>("planning/bspline", 10);
     data_disp_pub_ = node_->create_publisher<traj_utils::msg::DataDisp>("planning/data_display", 100);
 
-    if (target_type_ == TARGET_TYPE::MANUAL_TARGET)
+    if (require_session_) {
+      process_session_id_ = newProcessSession();
+      session_bspline_pub_ = node_->create_publisher<traj_utils::msg::SessionBspline>("planning/session_bspline", 50);
+      project_status_pub_ = node_->create_publisher<boom_birds_interfaces::msg::PlannerStatus>("/boom_birds/planner/status", 10);
+      project_request_sub_ = node_->create_subscription<boom_birds_interfaces::msg::PlannerRequest>(
+          "/boom_birds/planner/request", 50, std::bind(&EGOReplanFSM::projectRequest, this, std::placeholders::_1));
+      project_control_sub_ = node_->create_subscription<boom_birds_interfaces::msg::ExecutionStatus>(
+          "/boom_birds/control/execution_status", 50,
+          [this](boom_birds_interfaces::msg::ExecutionStatus::ConstSharedPtr status) {
+            const double age = node_->now().seconds() - rclcpp::Time(status->header.stamp).seconds();
+            if (age < -future_tolerance_s_ || age > authorization_timeout_s_) return;
+            if (session_id_ != status->session_id) {
+              have_target_ = false;
+              session_id_ = status->session_id;
+              request_sequence_ = spline_sequence_ = 0;
+            }
+            control_status_stamp_ = status->header.stamp;
+            offboard_confirmed_ = status->offboard_confirmed;
+          });
+    }
+    else if (target_type_ == TARGET_TYPE::MANUAL_TARGET)
     {
       waypoint_sub_ = node_->create_subscription<geometry_msgs::msg::PoseStamped>(
           "/move_base_simple/goal",
@@ -155,6 +188,44 @@ namespace ego_planner
     }
     else
       cout << "Wrong target_type_ value! target_type_=" << target_type_ << endl;
+  }
+
+  void EGOReplanFSM::publishProjectSpline(const traj_utils::msg::Bspline &spline)
+  {
+    if (!require_session_) { bspline_pub_->publish(spline); return; }
+    if (session_id_.empty()) return;
+    traj_utils::msg::SessionBspline wrapped;
+    wrapped.header.stamp = node_->now();
+    wrapped.header.frame_id = project_world_frame_;
+    wrapped.session_id = session_id_;
+    wrapped.producer_session_id = process_session_id_;
+    wrapped.sequence = ++spline_sequence_;
+    wrapped.trajectory = spline;
+    session_bspline_pub_->publish(wrapped);
+  }
+
+  void EGOReplanFSM::projectRequest(boom_birds_interfaces::msg::PlannerRequest::ConstSharedPtr request)
+  {
+    if (request->header.frame_id != project_world_frame_ || session_id_.empty() || request->session_id != session_id_ || request->sequence <= request_sequence_) return;
+    const double age = node_->now().seconds() - rclcpp::Time(request->header.stamp).seconds();
+    if (age < -future_tolerance_s_ || age > authorization_timeout_s_) return;
+    request_sequence_ = request->sequence;
+    if (!request->enabled) {
+      have_target_ = false;
+      traj_utils::msg::Bspline invalid;
+      invalid.order = 0;
+      publishProjectSpline(invalid);
+      changeFSMExecState(FSM_EXEC_STATE::WAIT_TARGET, "PROJECT_CANCEL");
+      return;
+    }
+    if (!offboard_confirmed_ || !have_odom_ || !planner_manager_->grid_map_->mapReady(planner_manager_->grid_map_->getReadyMinFusionUpdates())) return;
+    Eigen::Vector3d goal(request->goal.x, request->goal.y, request->goal.z);
+    if (!goal.allFinite()) return;
+    // Repeated enable requests acknowledge the active goal without restarting planning.
+    if (have_target_ && (goal - end_pt_).squaredNorm() < 1e-12) return;
+    have_trigger_ = true;
+    target_type_ = TARGET_TYPE::MANUAL_TARGET;
+    planNextWaypoint(goal);
   }
 
   void EGOReplanFSM::readGivenWps()
@@ -208,7 +279,9 @@ namespace ego_planner
       have_new_target_ = true;
 
       /*** FSM状态转换 ***/
-      if (exec_state_ == WAIT_TARGET)
+      if (require_session_)
+        changeFSMExecState(exec_state_ == EXEC_TRAJ ? REPLAN_TRAJ : GEN_NEW_TRAJ, "PROJECT_GOAL");
+      else if (exec_state_ == WAIT_TARGET)
         changeFSMExecState(GEN_NEW_TRAJ, "TRIG");
       else
       {
@@ -466,6 +539,58 @@ namespace ego_planner
 
   void EGOReplanFSM::execFSMCallback()
   {
+    // [BB-A3] 几何闭锁优先于一切规划动作。exec 定时器(10ms) 比 safety 定时器(50ms) 快，
+    // 若只靠 checkCollisionCallback 拦截，闭锁之后仍可能用旧几何的地图发出新轨迹。
+    if (planner_manager_->grid_map_->cameraGeometryFault()) {
+      if (!geometry_fault_announced_) {
+        geometry_fault_announced_ = true;
+        traj_utils::msg::Bspline invalid;
+        invalid.order = 0;
+        publishProjectSpline(invalid);
+        RCLCPP_ERROR(node_->get_logger(),
+                     "[BB-A3] 相机几何闭锁：停止规划与轨迹下发，等待显式重建与重新规划");
+      }
+      have_target_ = false;
+      have_trigger_ = false;
+      return;
+    }
+    geometry_fault_announced_ = false;
+
+    // [BB-A3] 几何重建（代次 +1）表示旧地图与旧轨迹都已作废。
+    // 这里只作废与停发，绝不自动续用；重新规划必须由外部显式给出新目标。
+    {
+      const int generation = planner_manager_->grid_map_->cameraGeometryGeneration();
+      if (!geometry_generation_seen_) {
+        geometry_generation_seen_ = true;
+        geometry_generation_ = generation;
+      } else if (generation != geometry_generation_) {
+        geometry_generation_ = generation;
+        traj_utils::msg::Bspline invalid;
+        invalid.order = 0;
+        publishProjectSpline(invalid);
+        have_target_ = false;
+        have_trigger_ = false;
+        changeFSMExecState(FSM_EXEC_STATE::WAIT_TARGET, "GEOMETRY_REBUILT");
+        RCLCPP_WARN(node_->get_logger(),
+                    "[BB-A3] 相机几何已重建（代次 %d）：旧轨迹作废，必须显式重新规划",
+                    generation);
+        return;
+      }
+    }
+
+    if (require_session_) {
+      const double age = node_->now().seconds() - control_status_stamp_.seconds();
+      if (session_id_.empty() || !offboard_confirmed_ || age < -future_tolerance_s_ || age > authorization_timeout_s_) {
+        if (have_target_) {
+          traj_utils::msg::Bspline invalid;
+          invalid.order = 0;
+          publishProjectSpline(invalid);
+        }
+        have_target_ = false;
+        return;
+      }
+    }
+
     exec_timer_->cancel(); // To avoid blockage
 
     static int fsm_num = 0;
@@ -515,7 +640,7 @@ namespace ego_planner
       {
         if (have_odom_ && have_target_ && have_trigger_)
         {
-          bool success = planFromGlobalTraj(10); // zx-todo
+          bool success = planFromGlobalTraj(require_session_ ? 1 : 10); // zx-todo
           if (success)
           {
             changeFSMExecState(EXEC_TRAJ, "FSM");
@@ -540,7 +665,7 @@ namespace ego_planner
     case GEN_NEW_TRAJ:
     {
 
-      bool success = planFromGlobalTraj(10); // zx-todo
+      bool success = planFromGlobalTraj(require_session_ ? 1 : 10); // zx-todo
       if (success)
       {
         changeFSMExecState(EXEC_TRAJ, "FSM");
@@ -649,6 +774,7 @@ namespace ego_planner
 
   bool EGOReplanFSM::planFromGlobalTraj(const int trial_times /*=1*/) // zx-todo
   {
+    planner_manager_->beginPlanningCycle();
     start_pt_ = odom_pos_;
     start_vel_ = odom_vel_;
     start_acc_.setZero();
@@ -661,6 +787,7 @@ namespace ego_planner
 
     for (int i = 0; i < trial_times; i++)
     {
+      if (planner_manager_->planningBudgetExpired()) return false;
       if (callReboundReplan(true, flag_random_poly_init))
       {
         return true;
@@ -672,15 +799,25 @@ namespace ego_planner
   bool EGOReplanFSM::planFromCurrentTraj(const int trial_times /*=1*/)
   {
 
+    planner_manager_->beginPlanningCycle();
     LocalTrajData *info = &planner_manager_->local_data_;
     // ros::Time time_now = ros::Time::now();
     auto time_now = rclcpp::Clock().now();
     // double t_cur = (time_now - info->start_time_).toSec();
     double t_cur = (time_now - info->start_time_).seconds();
 
-    start_pt_ = info->position_traj_.evaluateDeBoorT(t_cur);
-    start_vel_ = info->velocity_traj_.evaluateDeBoorT(t_cur);
-    start_acc_ = info->acceleration_traj_.evaluateDeBoorT(t_cur);
+    if (require_session_) {
+      // PX4 tracking can lag the commanded spline. A project replan must start
+      // from fresh measured motion, rather than advancing an unexecuted curve.
+      start_pt_ = odom_pos_;
+      start_vel_ = odom_vel_;
+      start_acc_.setZero();
+    } else {
+      t_cur = std::max(0.0, std::min(info->duration_, t_cur));
+      start_pt_ = info->position_traj_.evaluateDeBoorT(t_cur);
+      start_vel_ = info->velocity_traj_.evaluateDeBoorT(t_cur);
+      start_acc_ = info->acceleration_traj_.evaluateDeBoorT(t_cur);
+    }
 
     bool success = callReboundReplan(false, false);
 
@@ -707,6 +844,26 @@ namespace ego_planner
 
   void EGOReplanFSM::checkCollisionCallback()
   {
+    if (require_session_ && project_status_pub_) {
+      boom_birds_interfaces::msg::PlannerStatus status;
+      status.header.stamp = node_->now();
+      status.header.frame_id = project_world_frame_;
+      status.session_id = session_id_;
+      status.producer_session_id = process_session_id_;
+      status.map_ready = planner_manager_->grid_map_->mapReady(planner_manager_->grid_map_->getReadyMinFusionUpdates());
+      status.geometry_fault = planner_manager_->grid_map_->cameraGeometryFault();
+      status.goal_active = have_target_;
+      project_status_pub_->publish(status);
+    }
+
+    if (planner_manager_->grid_map_->cameraGeometryFault()) {
+      traj_utils::msg::Bspline invalid;
+      invalid.order = 0;
+      publishProjectSpline(invalid);
+      have_target_ = false;
+      return;
+    }
+
 
     LocalTrajData *info = &planner_manager_->local_data_;
     auto map = planner_manager_->grid_map_;
@@ -806,10 +963,16 @@ namespace ego_planner
       // Repeat at the bounded retry rate so late subscribers also invalidate.
       traj_utils::msg::Bspline invalid;
       invalid.order = 0;
-      bspline_pub_->publish(invalid);
+      publishProjectSpline(invalid);
     };
 
-    getLocalTarget();
+    if (!getLocalTarget()) {
+      RCLCPP_WARN_THROTTLE(node_->get_logger(), *node_->get_clock(), 1000,
+                          "No unoccupied local target; refusing planning");
+      invalidate_executor();
+      defer_retry();
+      return false;
+    }
 
     // [BB-PATCH-READY] 建图就绪门控：地图尚未被深度数据真正写入时不生成轨迹。
     // 实测在链路刚启动时会用"半张地图"规划出与障碍相交的轨迹；这些轨迹不应发布。
@@ -860,7 +1023,7 @@ namespace ego_planner
       }
 
       /* 1. publish traj to traj_server */
-      bspline_pub_->publish(bspline);
+      publishProjectSpline(bspline);
 
       /* 2. publish traj to the next drone of swarm */
 
@@ -958,12 +1121,12 @@ namespace ego_planner
       bspline.knots.push_back(knots(i));
     }
 
-    bspline_pub_->publish(bspline);
+    publishProjectSpline(bspline);
 
     return true;
   }
 
-  void EGOReplanFSM::getLocalTarget()
+  bool EGOReplanFSM::getLocalTarget()
   {
     double t;
 
@@ -1004,7 +1167,7 @@ namespace ego_planner
         break;
       }
     }
-    if (t > planner_manager_->global_data_.global_duration_) // Last global point
+    if (t >= planner_manager_->global_data_.global_duration_) // Last global point
     {
       local_target_pt_ = end_pt_;
       planner_manager_->global_data_.last_progress_time_ = planner_manager_->global_data_.global_duration_;
@@ -1018,6 +1181,19 @@ namespace ego_planner
     {
       local_target_vel_ = planner_manager_->global_data_.getVelocity(t);
     }
+    if (require_session_) {
+      auto target = selectLocalTarget(start_pt_, local_target_pt_, end_pt_,
+          local_target_search_radius_m_, local_target_search_step_m_,
+          [this](const Eigen::Vector3d& p) { return planner_manager_->grid_map_->getInflateOccupancy(p) == 0; });
+      if (!target) return false;
+      if ((*target - local_target_pt_).norm() > 1e-6) {
+        RCLCPP_INFO(node_->get_logger(), "Local target adjusted: (%.3f,%.3f,%.3f) -> (%.3f,%.3f,%.3f)",
+                    local_target_pt_.x(), local_target_pt_.y(), local_target_pt_.z(), target->x(), target->y(), target->z());
+        local_target_pt_ = *target;
+        local_target_vel_.setZero();
+      }
+    }
+    return true;
   }
 
 } // namespace ego_planner

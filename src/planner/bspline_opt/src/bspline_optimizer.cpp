@@ -846,7 +846,12 @@ namespace ego_planner
     BsplineOptimizer *opt = reinterpret_cast<BsplineOptimizer *>(func_data);
     // cout << "k=" << k << endl;
     // cout << "opt->flag_continue_to_optimize_=" << opt->flag_continue_to_optimize_ << endl;
-    return (opt->force_stop_type_ == STOP_FOR_ERROR || opt->force_stop_type_ == STOP_FOR_REBOUND);
+    return opt->a_star_->budgetExpired() || (opt->force_stop_type_ == STOP_FOR_ERROR || opt->force_stop_type_ == STOP_FOR_REBOUND);
+  }
+
+  int BsplineOptimizer::deadlineExit(void *func_data, const double *, const double *, const double, const double, const double, const double, int, int, int)
+  {
+    return reinterpret_cast<BsplineOptimizer *>(func_data)->a_star_->budgetExpired();
   }
 
   // 利用combineCostRebound计算损失
@@ -1558,6 +1563,7 @@ namespace ego_planner
     constexpr int MAX_RESART_NUMS_SET = 3;
     do
     {
+      if (a_star_->budgetExpired()) return false;
       /* ---------- prepare ---------- */
       min_cost_ = std::numeric_limits<double>::max();
       min_ellip_dist_ = INIT_min_ellip_dist_;
@@ -1748,7 +1754,7 @@ namespace ego_planner
       lbfgs_params.max_iterations = 200;
       lbfgs_params.g_epsilon = 0.001;
 
-      int result = lbfgs::lbfgs_optimize(variable_num_, q, &final_cost, BsplineOptimizer::costFunctionRefine, NULL, NULL, this, &lbfgs_params);
+      int result = lbfgs::lbfgs_optimize(variable_num_, q, &final_cost, BsplineOptimizer::costFunctionRefine, NULL, BsplineOptimizer::deadlineExit, this, &lbfgs_params);
       if (result == lbfgs::LBFGS_CONVERGENCE ||
           result == lbfgs::LBFGSERR_MAXIMUMITERATION ||
           result == lbfgs::LBFGS_ALREADY_MINIMIZED ||

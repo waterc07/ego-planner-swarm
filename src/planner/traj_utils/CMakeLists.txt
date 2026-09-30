@@ -25,6 +25,7 @@ find_package(PCL REQUIRED)
 
 rosidl_generate_interfaces(traj_utils
   "msg/Bspline.msg"
+  "msg/SessionBspline.msg"
   "msg/DataDisp.msg"
   "msg/MultiBsplines.msg"
 

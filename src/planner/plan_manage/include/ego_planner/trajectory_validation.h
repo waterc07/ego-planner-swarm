@@ -32,6 +32,16 @@ inline bool dilateCubicTime(UniformBspline& curve, double ratio) {
   curve.setKnot(knots);
   return true;
 }
+// Preserve geometry and reject dilation when its initial velocity would jump.
+inline bool dilateWithStartVelocity(UniformBspline& curve, double ratio,
+                                   const Eigen::Vector3d& velocity, double tolerance) {
+  if (!velocity.allFinite() || !std::isfinite(tolerance) || tolerance < 0) return false;
+  auto candidate = curve;
+  if (!dilateCubicTime(candidate, ratio) ||
+      (candidate.getDerivative().evaluateDeBoorT(0.0) - velocity).norm() > tolerance) return false;
+  curve = candidate;
+  return true;
+}
 // Entire interval lies within speed_bound*dt/2 of its midpoint.
 // Query every voxel intersecting that enclosing cube in the inflated map.
 inline bool sweptPathClear(UniformBspline curve, double speed_bound,

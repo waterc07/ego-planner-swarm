@@ -107,6 +107,7 @@ struct Harness
   rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr depth_pub;
   rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr pose_pub;
   rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr odom_pub;
+  rclcpp::Publisher<sensor_msgs::msg::CameraInfo>::SharedPtr info_pub;
   Scene scene;
 };
 
@@ -125,11 +126,10 @@ void spinMs(const rclcpp::Node::SharedPtr &node, int ms)
   }
 }
 
-Harness makeHarness(const std::string &name, bool use_filter, int skip_pixel,
-                    double max_ray = 4.5, double max_dist = 5.0)
+std::vector<rclcpp::Parameter> baseGridMapParams(bool use_filter, int skip_pixel,
+                                                 double max_ray, double max_dist)
 {
-  Harness h;
-  std::vector<rclcpp::Parameter> params = {
+  return {
       rclcpp::Parameter("grid_map/resolution", 0.1),
       rclcpp::Parameter("grid_map/map_size_x", 20.0),
       rclcpp::Parameter("grid_map/map_size_y", 20.0),
@@ -142,10 +142,6 @@ Harness makeHarness(const std::string &name, bool use_filter, int skip_pixel,
       rclcpp::Parameter("grid_map/ground_height", -0.01),
       rclcpp::Parameter("grid_map/virtual_ceil_height", 4.9),
       rclcpp::Parameter("grid_map/visualization_truncate_height", 4.9),
-      rclcpp::Parameter("grid_map/fx", h.scene.fx),
-      rclcpp::Parameter("grid_map/fy", h.scene.fy),
-      rclcpp::Parameter("grid_map/cx", h.scene.cx),
-      rclcpp::Parameter("grid_map/cy", h.scene.cy),
       rclcpp::Parameter("grid_map/use_depth_filter", use_filter),
       rclcpp::Parameter("grid_map/depth_filter_tolerance", 0.15),
       rclcpp::Parameter("grid_map/depth_filter_maxdist", max_dist),
@@ -167,6 +163,11 @@ Harness makeHarness(const std::string &name, bool use_filter, int skip_pixel,
       rclcpp::Parameter("grid_map/virtual_ceil_yp", 4.9),
       rclcpp::Parameter("grid_map/virtual_ceil_yn", -0.01),
   };
+}
+
+Harness buildHarness(const std::string &name, const std::vector<rclcpp::Parameter> &params)
+{
+  Harness h;
   rclcpp::NodeOptions opt;
   opt.parameter_overrides(params);
   h.node = std::make_shared<rclcpp::Node>(name, opt);
@@ -175,8 +176,83 @@ Harness makeHarness(const std::string &name, bool use_filter, int skip_pixel,
   h.depth_pub = h.node->create_publisher<sensor_msgs::msg::Image>("grid_map/depth", rclcpp::QoS(50).reliable());
   h.pose_pub = h.node->create_publisher<geometry_msgs::msg::PoseStamped>("grid_map/pose", rclcpp::QoS(25).reliable());
   h.odom_pub = h.node->create_publisher<nav_msgs::msg::Odometry>("grid_map/odom", rclcpp::QoS(10).reliable());
+  h.info_pub = h.node->create_publisher<sensor_msgs::msg::CameraInfo>("grid_map/camera_info", rclcpp::QoS(50).reliable());
   spinMs(h.node, 30);
   return h;
+}
+
+Harness makeHarness(const std::string &name, bool use_filter, int skip_pixel,
+                    double max_ray = 4.5, double max_dist = 5.0)
+{
+  std::vector<rclcpp::Parameter> params = baseGridMapParams(use_filter, skip_pixel, max_ray, max_dist);
+  const Scene scene;
+  params.push_back(rclcpp::Parameter("grid_map/fx", scene.fx));
+  params.push_back(rclcpp::Parameter("grid_map/fy", scene.fy));
+  params.push_back(rclcpp::Parameter("grid_map/cx", scene.cx));
+  params.push_back(rclcpp::Parameter("grid_map/cy", scene.cy));
+  return buildHarness(name, params);
+}
+
+// [BB-A3] CameraInfo 模式：不提供任何静态内参，几何只能来自三路同步里的 CameraInfo。
+Harness makeCameraHarness(const std::string &name, bool use_filter = false, int skip_pixel = 2)
+{
+  std::vector<rclcpp::Parameter> params = baseGridMapParams(use_filter, skip_pixel, 4.5, 5.0);
+  params.push_back(rclcpp::Parameter("grid_map/use_camera_info", true));
+  return buildHarness(name, params);
+}
+
+// CameraInfo 模式下的一帧：depth + pose + camera_info 三路同时间戳。
+void publishCameraFrame(Harness &h, const cv::Mat &depth32f,
+                        const std::string &frame_id = "cam0_rect", int spin_ms = 130,
+                        double pose_offset_s = 0.0)
+{
+  cv_bridge::CvImage img;
+  img.header.stamp = h.node->now();
+  img.header.frame_id = frame_id;
+  img.encoding = sensor_msgs::image_encodings::TYPE_32FC1;
+  img.image = depth32f;
+  auto msg = img.toImageMsg();
+
+  sensor_msgs::msg::CameraInfo info;
+  info.header = msg->header;
+  info.width = depth32f.cols;
+  info.height = depth32f.rows;
+  info.p = {h.scene.fx, 0.0, h.scene.cx, 0.0,
+            0.0, h.scene.fy, h.scene.cy, 0.0,
+            0.0, 0.0, 1.0, 0.0};
+
+  geometry_msgs::msg::PoseStamped pose;
+  pose.header = msg->header;
+  pose.header.stamp = rclcpp::Time(msg->header.stamp) + rclcpp::Duration::from_seconds(pose_offset_s);
+  pose.pose.position.x = h.scene.C(0);
+  pose.pose.position.y = h.scene.C(1);
+  pose.pose.position.z = h.scene.C(2);
+  Eigen::Quaterniond q(h.scene.R);
+  q.normalize();
+  pose.pose.orientation.w = q.w();
+  pose.pose.orientation.x = q.x();
+  pose.pose.orientation.y = q.y();
+  pose.pose.orientation.z = q.z();
+
+  h.info_pub->publish(info);
+  h.depth_pub->publish(*msg);
+  h.pose_pub->publish(pose);
+  spinMs(h.node, spin_ms);
+}
+
+// 与 publishCameraFrame 同口径，但只改内参：用于模拟"运行中内参变化"。
+sensor_msgs::msg::CameraInfo cameraInfoFor(const Harness &h, const rclcpp::Time &stamp,
+                                           const std::string &frame_id = "cam0_rect")
+{
+  sensor_msgs::msg::CameraInfo info;
+  info.header.stamp = stamp;
+  info.header.frame_id = frame_id;
+  info.width = 640;
+  info.height = 480;
+  info.p = {h.scene.fx, 0.0, h.scene.cx, 0.0,
+            0.0, h.scene.fy, h.scene.cy, 0.0,
+            0.0, 0.0, 1.0, 0.0};
+  return info;
 }
 
 // 以 32FC1（米制）发布一帧深度 + 同时间戳的相机位姿，并给回调/定时器留出处理时间
@@ -532,6 +608,271 @@ void scenario6_readiness()
 }
 #endif
 
+#ifndef BB_PREPATCH
+void scenario7_camera_geometry()
+{
+  g_scene = "S7[CameraInfo 三路同步/严格校验/未就绪]";
+  printf("\n=== %s ===\n", g_scene.c_str());
+  Harness h = makeHarness("bb_s7_camera_geometry", false, 2);
+  h.gm->use_camera_info_ = true;
+  sensor_msgs::msg::Image image;
+  image.header.stamp = h.node->now(); image.header.frame_id = "cam0_rect";
+  image.width = 320; image.height = 240;
+
+  // --- 未就绪：深度先到但无内参 ---
+  check(!h.gm->imageGeometryValid(image), "S7/missing info refuses depth", "");
+  check(!h.gm->mapReady(1), "S7/no geometry cannot become ready", "");
+  check(h.gm->cameraGeometryRejectCount() > 0 && !h.gm->cameraGeometryRejectReason().empty(),
+        "S7/rejection is diagnosed", h.gm->cameraGeometryRejectReason());
+
+  auto info = std::make_shared<sensor_msgs::msg::CameraInfo>();
+  info->header = image.header; info->width = 320; info->height = 240;
+  info->p = {170.,0.,157.,0.,0.,170.,117.,0.,0.,0.,1.,0.};
+  h.gm->cameraInfoCallback(info);
+  check(!h.gm->cameraGeometryFault(), "S7/first valid info does not latch", "");
+
+  // --- 三路同步：尺寸 / 光学帧 / 时间戳 / 配对 ---
+  check(h.gm->imageGeometryValid(image), "S7/matched geometry accepts depth", "");
+  check(!h.gm->mapReady(1), "S7/info before first fusion is not ready", "");
+  image.width = 240;
+  check(!h.gm->imageGeometryValid(image), "S7/mismatched width refuses depth", "");
+  image.width = 320; image.header.frame_id = "wrong";
+  check(!h.gm->imageGeometryValid(image), "S7/mismatched frame refuses depth", "");
+  image.header.frame_id = "cam0_rect"; image.header.stamp.sec -= 2;
+  check(!h.gm->imageGeometryValid(image), "S7/stale frame refuses depth", "");
+  // 同一几何、新的时间戳：只刷新时间戳，不得闭锁，也不得停止融合
+  image.header.stamp = h.node->now();
+  auto refreshed = std::make_shared<sensor_msgs::msg::CameraInfo>(*info);
+  refreshed->header.stamp = image.header.stamp;
+  h.gm->cameraInfoCallback(refreshed);
+  check(!h.gm->cameraGeometryFault(), "S7/same geometry with a new stamp does not latch", "");
+  check(h.gm->imageGeometryValid(image), "S7/same geometry with a new stamp keeps fusing", "");
+  // 深度帧与 CameraInfo 必须来自同一次输出：陈旧的内参时间戳同样拒绝
+  auto stale_info = std::make_shared<sensor_msgs::msg::CameraInfo>(*info);
+  stale_info->header.stamp.sec -= 1;
+  h.gm->cameraInfoCallback(stale_info);
+  check(!h.gm->imageGeometryValid(image), "S7/info from another output refuses the frame",
+        h.gm->cameraGeometryRejectReason());
+  h.gm->cameraInfoCallback(refreshed);
+
+  // --- 严格 P 校验：任何一项不成立都不得作为唯一几何来源 ---
+  auto rejects = [](const char *name,
+                    const std::function<void(sensor_msgs::msg::CameraInfo &)> &mut) {
+    sensor_msgs::msg::CameraInfo candidate;
+    candidate.header.frame_id = "cam0_rect";
+    candidate.width = 320; candidate.height = 240;
+    candidate.p = {170.,0.,157.,0.,0.,170.,117.,0.,0.,0.,1.,0.};
+    mut(candidate);
+    std::string reason;
+    check(!GridMap::validateCameraInfo(candidate, reason), name, reason);
+  };
+  {
+    std::string reason;
+    sensor_msgs::msg::CameraInfo good = *info;
+    check(GridMap::validateCameraInfo(good, reason), "S7/valid P is accepted", reason);
+  }
+  rejects("S7/non-finite P refused",
+          [](sensor_msgs::msg::CameraInfo &c) { c.p[5] = std::numeric_limits<double>::quiet_NaN(); });
+  rejects("S7/right-camera P (P[0][3] != 0) refused",
+          [](sensor_msgs::msg::CameraInfo &c) { c.p[3] = -11.5; });
+  rejects("S7/P[10] != 1 refused",
+          [](sensor_msgs::msg::CameraInfo &c) { c.p[10] = 0.9; });
+  rejects("S7/principal point outside image refused",
+          [](sensor_msgs::msg::CameraInfo &c) { c.p[2] = 400.0; });
+  rejects("S7/negative principal point refused",
+          [](sensor_msgs::msg::CameraInfo &c) { c.p[6] = -1.0; });
+  rejects("S7/non-positive fx refused",
+          [](sensor_msgs::msg::CameraInfo &c) { c.p[0] = 0.0; });
+  rejects("S7/empty optical frame refused",
+          [](sensor_msgs::msg::CameraInfo &c) { c.header.frame_id.clear(); });
+  rejects("S7/non-positive size refused",
+          [](sensor_msgs::msg::CameraInfo &c) { c.width = 0; });
+  rejects("S7/P with skew refused",
+          [](sensor_msgs::msg::CameraInfo &c) { c.p[1] = 2.0; });
+  // 注：CameraInfo::p 在 C++ 侧是 std::array<double,12>，长度恒为 12，
+  // 因此 validateCameraInfo 里的长度检查只是防御性代码，无法在此构造用例。
+  rejects("S7/non-zero P[11] refused",
+          [](sensor_msgs::msg::CameraInfo &c) { c.p[11] = 1.0; });
+}
+
+// ---------------------------------------------------------------- S8
+// [BB-A3] 运行中几何变化 → 闭锁地图与轨迹；只有显式重建才能恢复，且必须重新规划。
+void scenario8_geometry_latch_and_rebuild()
+{
+  g_scene = "S8[内参变化闭锁/旧体素清空/显式重建]";
+  printf("\n=== %s ===\n", g_scene.c_str());
+  Harness h = makeCameraHarness("bb_s8_geometry_latch", false, 2);
+
+  // 先让地图真正被深度写过（走 depth+pose+camera_info 三路同步的真实回调）
+  for (int i = 0; i < 20; ++i)
+    publishCameraFrame(h, constDepth(3.0f));
+  check(!h.gm->cameraGeometryFault(), "S8/consistent geometry never latches", h.gm->cameraGeometryRejectReason());
+  check(h.gm->mapReady(1), "S8/map becomes ready with consistent geometry", "");
+  check(countOccupied(h.gm) > 0, "S8/map has occupancy before the change", std::to_string(countOccupied(h.gm)));
+  const int gen0 = h.gm->cameraGeometryGeneration();
+  check(gen0 == 0, "S8/no rebuild yet keeps generation 0", std::to_string(gen0));
+
+  // 运行中内参变化：必须闭锁，并且旧占据体素 / 膨胀 / 深度缓存都不得残留
+  sensor_msgs::msg::CameraInfo changed = cameraInfoFor(h, h.node->now());
+  changed.p[0] = 400.0;   // fx 变化（同一标定之外的新内参）
+  h.info_pub->publish(changed);
+  spinMs(h.node, 150);
+  check(h.gm->cameraGeometryFault(), "S8/intrinsics change latches the map", h.gm->cameraGeometryRejectReason());
+  check(countOccupied(h.gm) == 0, "S8/latched map must not keep old occupied voxels",
+        std::to_string(countOccupied(h.gm)));
+  {
+    int inflated = 0;
+    for (char v : h.gm->md_.occupancy_buffer_inflate_)
+      if (v != 0) ++inflated;
+    check(inflated == 0, "S8/latched map must not keep inflated voxels", std::to_string(inflated));
+  }
+  check(h.gm->md_.depth_image_.empty(), "S8/latched map must drop the previous depth image", "");
+  check(h.gm->md_.depth_invalid_mask_.empty(), "S8/latched map must drop the previous invalid mask", "");
+  check(!h.gm->md_.has_valid_depth_obs_, "S8/latched map must forget depth readiness", "");
+  check(!h.gm->mapReady(1), "S8/latched map is never ready", "");
+  check(h.gm->cameraGeometryRebuildPending(), "S8/new geometry is held as a rebuild candidate", "");
+  check(h.gm->cameraGeometryGeneration() == gen0, "S8/latch itself does not bump the generation", "");
+
+  // 闭锁期间：再来的深度不得融合，旧几何也不得自动解除闭锁
+  publishCameraFrame(h, constDepth(3.0f));
+  check(countOccupied(h.gm) == 0, "S8/no fusion while latched", std::to_string(countOccupied(h.gm)));
+  h.info_pub->publish(cameraInfoFor(h, h.node->now()));
+  spinMs(h.node, 120);
+  check(h.gm->cameraGeometryFault(), "S8/old geometry cannot clear the latch", "");
+
+  // 显式重建：只有 grid_map/geometry_reset 才切换几何
+  auto reset_pub = h.node->create_publisher<std_msgs::msg::Empty>("grid_map/geometry_reset", 10);
+  spinMs(h.node, 30);
+  reset_pub->publish(std_msgs::msg::Empty());
+  spinMs(h.node, 150);
+  check(!h.gm->cameraGeometryFault(), "S8/explicit reset clears the latch", h.gm->cameraGeometryRejectReason());
+  check(h.gm->cameraGeometryGeneration() == gen0 + 1,
+        "S8/rebuild must bump the geometry generation (forces an explicit replan)",
+        std::to_string(h.gm->cameraGeometryGeneration()));
+  check(countOccupied(h.gm) == 0, "S8/rebuilt map must be empty", std::to_string(countOccupied(h.gm)));
+  check(!h.gm->mapReady(1), "S8/rebuilt map is not ready before new fusion", "");
+
+  // 重建后：早于切换时刻的深度帧属于上一代几何，必须被拒
+  {
+    sensor_msgs::msg::Image stale;
+    stale.header.frame_id = "cam0_rect";
+    stale.width = 640; stale.height = 480;
+    stale.header.stamp = h.node->now() - rclcpp::Duration::from_seconds(1.0);
+    const int before = h.gm->cameraGeometryRejectCount();
+    const bool accepted = h.gm->imageGeometryValid(stale);
+    check(!accepted, "S8/frame older than the geometry switch is refused",
+          h.gm->cameraGeometryRejectReason());
+    check(!accepted && h.gm->cameraGeometryRejectCount() > before,
+          "S8/refusal carries a diagnostic", h.gm->cameraGeometryRejectReason());
+  }
+
+  // 重建后必须重新建立地图与轨迹：新几何的深度可以再次融合
+  for (int i = 0; i < 20; ++i)
+    publishCameraFrame(h, constDepth(3.0f));
+  const std::string diag =
+      "occ=" + std::to_string(countOccupied(h.gm)) +
+      " fusion=" + std::to_string(h.gm->md_.depth_fusion_updates_) +
+      " updates=" + std::to_string(h.gm->md_.update_num_) +
+      " need=" + std::to_string(static_cast<int>(h.gm->md_.occ_need_update_)) +
+      " depth_cols=" + std::to_string(h.gm->md_.depth_image_.cols) +
+      " valid_obs=" + std::to_string(static_cast<int>(h.gm->md_.has_valid_depth_obs_)) +
+      " flag_use=" + std::to_string(static_cast<int>(h.gm->md_.flag_use_depth_fusion)) +
+      " rejects=" + std::to_string(h.gm->cameraGeometryRejectCount()) +
+      " last_reject=" + h.gm->cameraGeometryRejectReason();
+  check(countOccupied(h.gm) > 0, "S8/new geometry can build the map again", diag);
+  check(h.gm->mapReady(1), "S8/map becomes ready again after re-fusion", diag);
+  check(h.gm->cameraGeometryGeneration() == gen0 + 1, "S8/re-fusion does not bump the generation", "");
+}
+
+// ---------------------------------------------------------------- S9
+// [BB-A3] 内参来源必须显式二选一；两条路径都不允许静默回退。
+void scenario9_static_mode_is_explicit()
+{
+  g_scene = "S9[静态模式显式选择/与 CameraInfo 互斥]";
+  printf("\n=== %s ===\n", g_scene.c_str());
+  int seq = 0;
+  auto attempt = [&seq](const std::vector<rclcpp::Parameter> &extra) {
+    std::vector<rclcpp::Parameter> params = baseGridMapParams(false, 2, 4.5, 5.0);
+    params.insert(params.end(), extra.begin(), extra.end());
+    rclcpp::NodeOptions opt;
+    opt.parameter_overrides(params);
+    auto node = std::make_shared<rclcpp::Node>("bb_s9_static_" + std::to_string(++seq), opt);
+    auto gm = std::make_shared<GridMap>();
+    gm->initMap(node);
+    return gm;
+  };
+  auto refused = [&attempt](const char *name, const std::vector<rclcpp::Parameter> &extra) {
+    bool threw = false;
+    std::string what;
+    try
+    {
+      attempt(extra);
+    }
+    catch (const std::exception &e)
+    {
+      threw = true;
+      what = e.what();
+    }
+    check(threw, name, what);
+  };
+  auto accepted = [&attempt](const char *name, const std::vector<rclcpp::Parameter> &extra) {
+    bool threw = false;
+    std::string what;
+    try
+    {
+      attempt(extra);
+    }
+    catch (const std::exception &e)
+    {
+      threw = true;
+      what = e.what();
+    }
+    check(!threw, name, what);
+  };
+
+  refused("S9/static mode without explicit intrinsics is refused", {});
+  refused("S9/CameraInfo and static intrinsics are mutually exclusive",
+          {rclcpp::Parameter("grid_map/use_camera_info", true),
+           rclcpp::Parameter("grid_map/fx", 387.0)});
+  refused("S9/CameraInfo mode with all four static values is refused",
+          {rclcpp::Parameter("grid_map/use_camera_info", true),
+           rclcpp::Parameter("grid_map/fx", 387.0), rclcpp::Parameter("grid_map/fy", 387.0),
+           rclcpp::Parameter("grid_map/cx", 321.0), rclcpp::Parameter("grid_map/cy", 243.0)});
+  accepted("S9/pure CameraInfo mode starts",
+           {rclcpp::Parameter("grid_map/use_camera_info", true)});
+  accepted("S9/explicit static intrinsics start",
+           {rclcpp::Parameter("grid_map/fx", 387.0), rclcpp::Parameter("grid_map/fy", 387.0),
+            rclcpp::Parameter("grid_map/cx", 321.0), rclcpp::Parameter("grid_map/cy", 243.0)});
+  refused("S9/non-positive static fx is refused",
+          {rclcpp::Parameter("grid_map/fx", -1.0), rclcpp::Parameter("grid_map/fy", 387.0),
+           rclcpp::Parameter("grid_map/cx", 321.0), rclcpp::Parameter("grid_map/cy", 243.0)});
+}
+void scenario10_timeout_recovery()
+{
+  g_scene = "S10[depth timeout recovery]";
+  Harness h = makeCameraHarness("bb_s10_recovery");
+  publishCameraFrame(h, constDepth(3.0f));
+  check(h.gm->md_.depth_fusion_updates_ > 0, "S10/initial fusion", "valid depth mapped");
+
+  h.gm->md_.flag_depth_odom_timeout_ = true;
+  publishCameraFrame(h, invalidDepth());
+  check(h.gm->getOdomDepthTimeout(), "S10/invalid cannot clear timeout", "no map update");
+
+  publishCameraFrame(h, constDepth(3.0f));
+  check(!h.gm->getOdomDepthTimeout(), "S10/new valid fusion clears timeout", "resume planning");
+}
+void scenario11_sync_window()
+{
+  g_scene = "S11[bounded depth pose synchronization]";
+  Harness h = makeCameraHarness("bb_s11_sync");
+  publishCameraFrame(h, constDepth(3.0f), "cam0_rect", 130, 0.06);
+  check(h.gm->md_.depth_fusion_updates_ == 0, "S11/stale pose rejected", "no fusion");
+  publishCameraFrame(h, constDepth(3.0f));
+  publishCameraFrame(h, constDepth(3.0f));
+  check(h.gm->md_.depth_fusion_updates_ > 0, "S11/matching frame resumes", "fresh fusion");
+}
+#endif
+
 } // namespace
 
 int main(int argc, char **argv)
@@ -549,6 +890,11 @@ int main(int argc, char **argv)
   scenario5_overrange();
 #ifndef BB_PREPATCH
   scenario6_readiness();
+  scenario7_camera_geometry();
+  scenario8_geometry_latch_and_rebuild();
+  scenario9_static_mode_is_explicit();
+  scenario10_timeout_recovery();
+  scenario11_sync_window();
 #endif
 
   printf("\nBB_GRIDMAP_TEST SUMMARY: pass=%d fail=%d\n", g_pass, g_fail);

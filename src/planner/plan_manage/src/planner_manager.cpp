@@ -1,3 +1,4 @@
+#include <stdexcept>
 #include "ego_planner/trajectory_validation.h"
 // #include <fstream>
 #include <ego_planner/planner_manager.h>
@@ -13,6 +14,14 @@ namespace ego_planner
 
   void EGOPlannerManager::initPlanModules(rclcpp::Node::SharedPtr &node, PlanningVisualization::Ptr vis)
   {
+    node->declare_parameter("manager/start_velocity_tolerance", 0.0);
+    node->get_parameter("manager/start_velocity_tolerance", start_velocity_tolerance_);
+    if (!std::isfinite(start_velocity_tolerance_) || start_velocity_tolerance_ < 0)
+      throw std::invalid_argument("manager/start_velocity_tolerance");
+    node->declare_parameter("manager/compute_budget_s", 0.0);
+    node->get_parameter("manager/compute_budget_s", compute_budget_s_);
+    if (!std::isfinite(compute_budget_s_) || compute_budget_s_ < 0)
+      throw std::invalid_argument("manager/compute_budget_s");
     node->declare_parameter("manager/max_vel", -1.0);
     node->declare_parameter("manager/max_acc", -1.0);
     node->declare_parameter("manager/max_jerk", -1.0);
@@ -315,8 +324,10 @@ namespace ego_planner
               !std::isfinite(bounds.acceleration)) return false;
           const double ratio = std::max(1.02, std::max(bounds.velocity / v_allow,
                                                      std::sqrt(bounds.acceleration / a_allow)));
-          if (stationary_boundaries) {
-            if (!dilateCubicTime(pos, ratio)) return false;
+          if (stationary_boundaries ||
+              (start_velocity_tolerance_ > 0 &&
+               dilateWithStartVelocity(pos, ratio, start_vel, start_velocity_tolerance_))) {
+            if (stationary_boundaries && !dilateCubicTime(pos, ratio)) return false;
             ts *= ratio;
             pos.setPhysicalLimits(pp_.max_vel_, pp_.max_acc_, pp_.feasibility_tolerance_);
             return true;
@@ -351,6 +362,7 @@ namespace ego_planner
       return false; // FSM invalidates executor output; NOT a hover guarantee.
     }
     t_refine = rclcpp::Clock().now() - t_start;
+    if (planningBudgetExpired()) return false;
     // Exactly one ID and start-time update per accepted candidate.
     updateTrajInfo(pos, rclcpp::Clock().now());
 

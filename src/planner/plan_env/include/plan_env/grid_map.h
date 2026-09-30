@@ -10,7 +10,11 @@
 #include <cv_bridge/cv_bridge.h>
 #endif
 #include <geometry_msgs/msg/pose_stamped.hpp>
+#include <sensor_msgs/msg/camera_info.hpp>
+#include <sensor_msgs/msg/image.hpp>
+#include <std_msgs/msg/empty.hpp>
 #include <iostream>
+#include <string>
 #include <random>
 #include <nav_msgs/msg/odometry.hpp>
 #include <queue>
@@ -210,6 +214,19 @@ public:
   bool hasDepthObservation();
   // [BB-PATCH-READY] 就绪查询：至少完成 N 次深度融合（地图已被深度数据真正写过）
   bool mapReady(int min_fusion_updates);
+  // [BB-A3] 相机几何闭锁：闭锁即地图与轨迹都作废，必须显式重建后才能再规划。
+  bool cameraGeometryFault() const { return geometry_fault_; }
+  // 闭锁期间是否已经收到一份**自洽**的新几何（可以执行重建）
+  bool cameraGeometryRebuildPending() const { return geometry_fault_ && pending_camera_info_ != nullptr; }
+  // 几何代次：每次按新几何重建 +1。规划侧依据"代次变化"要求重新规划，而不是继续用旧轨迹。
+  int cameraGeometryGeneration() const { return geometry_generation_; }
+  // 最近一次几何拒绝的诊断原因（空串 = 无拒绝）与累计次数
+  const std::string &cameraGeometryRejectReason() const { return geometry_reject_reason_; }
+  int cameraGeometryRejectCount() const { return geometry_reject_count_; }
+  // [BB-A3] 显式重建：必须同时给出与 info 完全自洽的一帧深度图。
+  // 只有该调用能解除闭锁；成功即清空旧占据体素，并把代次 +1（要求显式重新规划）。
+  bool rebuildCameraGeometry(const sensor_msgs::msg::CameraInfo &info,
+                             const sensor_msgs::msg::Image &image, std::string &reason);
   int getReadyMinFusionUpdates() { return mp_.ready_min_fusion_updates_; }
   bool odomValid();
   void getRegion(Eigen::Vector3d &ori, Eigen::Vector3d &size);
@@ -223,6 +240,48 @@ public:
   EIGEN_MAKE_ALIGNED_OPERATOR_NEW
 
 private:
+  // ---- [BB-A3] 相机几何：三路同源校验 + 变化闭锁 + 显式重建 ----
+  double depth_pose_tolerance_s_ = 0.03;
+  bool use_camera_info_ = false;
+  bool geometry_fault_ = false;
+  sensor_msgs::msg::CameraInfo::ConstSharedPtr camera_info_;
+  // 闭锁期间观察到的新几何（必须是"自洽"的一份，才允许作为重建依据）
+  sensor_msgs::msg::CameraInfo::ConstSharedPtr pending_camera_info_;
+  int geometry_generation_ = 0;
+  // 重建时刻：早于该时刻的深度帧属于上一代几何，不得进入新地图
+  rclcpp::Time geometry_epoch_{0, 0, RCL_SYSTEM_TIME};
+  std::string geometry_reject_reason_;
+  // 只在拒绝原因发生变化时打印，避免闭锁期间按帧刷日志
+  std::string geometry_reject_logged_;
+  int geometry_reject_count_ = 0;
+
+  void cameraInfoCallback(sensor_msgs::msg::CameraInfo::ConstSharedPtr info);
+  // 显式重建触发（std_msgs/Empty）。闭锁不会被任何自动路径清除。
+  void geometryResetCallback(const std_msgs::msg::Empty::SharedPtr msg);
+  // 严格校验一份 CameraInfo 是否可作为唯一几何来源；失败时给出原因。
+  static bool validateCameraInfo(const sensor_msgs::msg::CameraInfo &info, std::string &reason);
+  static bool sameCameraGeometry(const sensor_msgs::msg::CameraInfo &a,
+                                 const sensor_msgs::msg::CameraInfo &b);
+  bool imageGeometryValid(const sensor_msgs::msg::Image &image);
+  void rejectCameraGeometry(const std::string &reason);
+  void latchCameraGeometryFault(const std::string &reason);
+  // 把地图/深度缓存全部退回"未观测"状态：旧占据体素不得残留。
+  void clearMapForGeometryChange();
+  void depthInfoPoseCallback(const sensor_msgs::msg::Image::ConstSharedPtr &img,
+      const geometry_msgs::msg::PoseStamped::ConstSharedPtr &pose,
+      const sensor_msgs::msg::CameraInfo::ConstSharedPtr &info) {
+    cameraInfoCallback(info); depthPoseCallback(img, pose);
+  }
+  void depthInfoOdomCallback(const sensor_msgs::msg::Image::ConstSharedPtr &img,
+      const nav_msgs::msg::Odometry::ConstSharedPtr &odom,
+      const sensor_msgs::msg::CameraInfo::ConstSharedPtr &info) {
+    cameraInfoCallback(info); depthOdomCallback(img, odom);
+  }
+  using SyncInfoPose = message_filters::sync_policies::ApproximateTime<sensor_msgs::msg::Image, geometry_msgs::msg::PoseStamped, sensor_msgs::msg::CameraInfo>;
+  using SyncInfoOdom = message_filters::sync_policies::ApproximateTime<sensor_msgs::msg::Image, nav_msgs::msg::Odometry, sensor_msgs::msg::CameraInfo>;
+  std::shared_ptr<message_filters::Subscriber<sensor_msgs::msg::CameraInfo>> info_sub_;
+  std::shared_ptr<message_filters::Synchronizer<SyncInfoPose>> info_pose_sync_;
+  std::shared_ptr<message_filters::Synchronizer<SyncInfoOdom>> info_odom_sync_;
   MappingParameters mp_;
   MappingData md_;
 
@@ -270,6 +329,8 @@ private:
   rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr indep_cloud_sub_;
   rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr indep_odom_sub_;
   rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr extrinsic_sub_;
+  // [BB-A3] 显式重建触发：只有该话题上的一条消息才会解除几何闭锁
+  rclcpp::Subscription<std_msgs::msg::Empty>::SharedPtr geometry_reset_sub_;
 
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr map_pub_;
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr map_inf_pub_;

@@ -1,3 +1,7 @@
+#include "boom_birds_interfaces/msg/planner_request.hpp"
+#include "boom_birds_interfaces/msg/planner_status.hpp"
+#include "boom_birds_interfaces/msg/execution_status.hpp"
+#include "traj_utils/msg/session_bspline.hpp"
 #ifndef _REBO_REPLAN_FSM_H_
 #define _REBO_REPLAN_FSM_H_
 
@@ -113,7 +117,7 @@ namespace ego_planner
 
     void readGivenWps();
     void planNextWaypoint(const Eigen::Vector3d next_wp);
-    void getLocalTarget();
+    bool getLocalTarget();
 
     /* ROS functions */
     void execFSMCallback();
@@ -135,6 +139,27 @@ namespace ego_planner
     {
     }
 
+    std::string process_session_id_, project_world_frame_;
+    double local_target_search_radius_m_, local_target_search_step_m_;
+    bool require_session_ = false;
+    double authorization_timeout_s_ = 0.2, future_tolerance_s_ = 0.03;
+    std::string session_id_;
+    uint64_t request_sequence_ = 0, spline_sequence_ = 0;
+    rclcpp::Time control_status_stamp_{0, 0, RCL_ROS_TIME};
+    bool offboard_confirmed_ = false;
+
+    // [BB-A3] 相机几何闭锁与重建（代次）跟踪。
+    // geometry_generation_seen_ 让第一次回调只记录初值，之后任何代次变化都要求显式重新规划；
+    // geometry_fault_announced_ 保证闭锁只广播一次失效消息（后续由 safety 定时器持续补发）。
+    bool geometry_fault_announced_ = false;
+    bool geometry_generation_seen_ = false;
+    int geometry_generation_ = 0;
+    rclcpp::Subscription<boom_birds_interfaces::msg::PlannerRequest>::SharedPtr project_request_sub_;
+    rclcpp::Subscription<boom_birds_interfaces::msg::ExecutionStatus>::SharedPtr project_control_sub_;
+    rclcpp::Publisher<boom_birds_interfaces::msg::PlannerStatus>::SharedPtr project_status_pub_;
+    rclcpp::Publisher<traj_utils::msg::SessionBspline>::SharedPtr session_bspline_pub_;
+    void publishProjectSpline(const traj_utils::msg::Bspline &spline);
+    void projectRequest(boom_birds_interfaces::msg::PlannerRequest::ConstSharedPtr request);
     void init(rclcpp::Node::SharedPtr &node);
 
     EIGEN_MAKE_ALIGNED_OPERATOR_NEW

@@ -1,3 +1,8 @@
+#include "ego_planner/process_session.h"
+#include "boom_birds_interfaces/msg/planner_status.hpp"
+#include "boom_birds_interfaces/msg/execution_status.hpp"
+#include "boom_birds_interfaces/msg/control_command.hpp"
+#include "traj_utils/msg/session_bspline.hpp"
 #include "bspline_opt/uniform_bspline.h"
 #include "nav_msgs/msg/odometry.hpp"
 #include "traj_utils/msg/bspline.hpp"
@@ -14,6 +19,15 @@ double vel_gain[3] = {0, 0, 0};
 
 using ego_planner::UniformBspline;
 
+bool require_session_ = false;
+std::string project_world_frame_ = "global";
+double authorization_timeout_s_ = 0.2, future_tolerance_s_ = 0.03;
+std::string session_id_, authorized_session_, planner_session_;
+const std::string executor_session_ = ego_planner::newProcessSession();
+double authorization_stamp_ = 0.;
+bool authorized_offboard_ = false;
+uint64_t spline_sequence_ = 0, command_sequence_ = 0, project_trajectory_id_ = 0;
+rclcpp::Publisher<boom_birds_interfaces::msg::ControlCommand>::SharedPtr project_cmd_pub_;
 bool receive_traj_ = false;
 vector<UniformBspline> traj_;
 double traj_duration_;
@@ -79,6 +93,39 @@ void bsplineCallback(traj_utils::msg::Bspline::ConstPtr msg)
   traj_duration_ = traj_[0].getTimeSum();
 
   receive_traj_ = true;
+}
+
+void sessionSplineCallback(traj_utils::msg::SessionBspline::ConstSharedPtr msg)
+{
+  const double age = rclcpp::Clock().now().seconds() - rclcpp::Time(msg->header.stamp).seconds();
+  if (msg->header.frame_id != project_world_frame_ || msg->producer_session_id.empty() || msg->session_id.empty() || msg->session_id != authorized_session_ || !authorized_offboard_ || age < -future_tolerance_s_ || age > authorization_timeout_s_) return;
+  if (session_id_ != msg->session_id) {
+    session_id_ = msg->session_id;
+    spline_sequence_ = command_sequence_ = project_trajectory_id_ = 0;
+    planner_session_.clear();
+    receive_traj_ = false;
+    traj_.clear();
+  }
+  if (!planner_session_.empty() && planner_session_ != msg->producer_session_id) {
+    receive_traj_ = false; traj_.clear(); return;
+  }
+  planner_session_ = msg->producer_session_id;
+  if (msg->sequence <= spline_sequence_) return;
+  spline_sequence_ = msg->sequence;
+  ++project_trajectory_id_;
+  bsplineCallback(std::make_shared<traj_utils::msg::Bspline>(msg->trajectory));
+  if (!receive_traj_) {
+    boom_birds_interfaces::msg::ControlCommand cancel;
+    cancel.header.stamp = rclcpp::Clock().now();
+    cancel.header.frame_id = project_world_frame_;
+    cancel.session_id = session_id_;
+    cancel.planner_session_id = planner_session_;
+    cancel.executor_session_id = executor_session_;
+    cancel.sequence = ++command_sequence_;
+    cancel.trajectory_id = project_trajectory_id_;
+    cancel.command_type = cancel.CANCEL;
+    project_cmd_pub_->publish(cancel);
+  }
 }
 
 std::pair<double, double> calculate_yaw(double t_cur, Eigen::Vector3d &pos, rclcpp::Time &time_now, rclcpp::Time &time_last)
@@ -175,6 +222,14 @@ std::pair<double, double> calculate_yaw(double t_cur, Eigen::Vector3d &pos, rclc
 
 void cmdCallback()
 {
+  if (require_session_ && (session_id_ != authorized_session_ || !authorized_offboard_ ||
+      rclcpp::Clock().now().seconds() - authorization_stamp_ > authorization_timeout_s_ ||
+      rclcpp::Clock().now().seconds() < authorization_stamp_ - future_tolerance_s_)) {
+    receive_traj_ = false;
+    traj_.clear();
+    return;
+  }
+
   /* no publishing before receive traj_ */
   if (!receive_traj_)
     return;
@@ -241,7 +296,21 @@ void cmdCallback()
 
   last_yaw_ = cmd.yaw;
 
-  pos_cmd_pub->publish(cmd);
+  if (require_session_) {
+    boom_birds_interfaces::msg::ControlCommand out;
+    out.header = cmd.header;
+    out.header.frame_id = project_world_frame_;
+    out.session_id = session_id_;
+    out.planner_session_id = planner_session_;
+    out.executor_session_id = executor_session_;
+    out.sequence = ++command_sequence_;
+    out.trajectory_id = project_trajectory_id_;
+    out.valid_for = rclcpp::Duration::from_seconds(authorization_timeout_s_);
+    out.command_type = out.EXECUTE;
+    out.position = cmd.position; out.velocity = cmd.velocity; out.acceleration = cmd.acceleration;
+    out.yaw = cmd.yaw; out.yaw_rate = cmd.yaw_dot;
+    project_cmd_pub_->publish(out);
+  } else pos_cmd_pub->publish(cmd);
 }
 
 int main(int argc, char **argv)
@@ -249,15 +318,49 @@ int main(int argc, char **argv)
   rclcpp::init(argc, argv);
   auto node = rclcpp::Node::make_shared("traj_server");
 
-  auto bspline_sub = node->create_subscription<traj_utils::msg::Bspline>(
-      "planning/bspline",
-      10,
-      bsplineCallback);
+  require_session_ = node->declare_parameter("project/require_session", false);
+  project_world_frame_ = node->declare_parameter("project/world_frame", std::string("global"));
+  authorization_timeout_s_ = node->declare_parameter("project/authorization_timeout_s", 0.2);
+  future_tolerance_s_ = node->declare_parameter("project/future_tolerance_s", 0.03);
+  if (project_world_frame_.empty() || !std::isfinite(authorization_timeout_s_) || authorization_timeout_s_ <= 0 ||
+      !std::isfinite(future_tolerance_s_) || future_tolerance_s_ <= 0) throw std::invalid_argument("project protocol parameters");
+  rclcpp::Subscription<traj_utils::msg::Bspline>::SharedPtr bspline_sub;
+  rclcpp::Subscription<traj_utils::msg::SessionBspline>::SharedPtr session_sub;
+  if (require_session_) {
+    project_cmd_pub_ = node->create_publisher<boom_birds_interfaces::msg::ControlCommand>("/boom_birds/planner/command", 50);
+    session_sub = node->create_subscription<traj_utils::msg::SessionBspline>("planning/session_bspline", 50, sessionSplineCallback);
+  } else {
+    bspline_sub = node->create_subscription<traj_utils::msg::Bspline>("planning/bspline", 10, bsplineCallback);
+  }
+
+  auto status_sub = node->create_subscription<boom_birds_interfaces::msg::ExecutionStatus>(
+      "/boom_birds/control/execution_status", 50,
+      [](boom_birds_interfaces::msg::ExecutionStatus::ConstSharedPtr status) {
+        const double stamp = rclcpp::Time(status->header.stamp).seconds();
+        const double age = rclcpp::Clock().now().seconds() - stamp;
+        if (age < -future_tolerance_s_ || age > authorization_timeout_s_ || stamp < authorization_stamp_) return;
+        authorized_session_ = status->session_id;
+        authorized_offboard_ = status->offboard_confirmed;
+        authorization_stamp_ = stamp;
+      });
 
   pos_cmd_pub = node->create_publisher<quadrotor_msgs::msg::PositionCommand>(
       "/position_cmd",
       50);
 
+  auto executor_status_pub = node->create_publisher<boom_birds_interfaces::msg::PlannerStatus>(
+      "/boom_birds/planner/executor_status", 10);
+  auto executor_timer = node->create_wall_timer(std::chrono::milliseconds(50), [executor_status_pub]() {
+    const double now = rclcpp::Clock().now().seconds();
+    if (!require_session_ || authorized_session_.empty() || now - authorization_stamp_ > authorization_timeout_s_ ||
+        now < authorization_stamp_ - future_tolerance_s_) return;
+    boom_birds_interfaces::msg::PlannerStatus status;
+    status.header.stamp = rclcpp::Clock().now();
+    status.header.frame_id = project_world_frame_;
+    status.session_id = authorized_session_;
+    status.producer_session_id = executor_session_;
+    executor_status_pub->publish(status);
+  });
   auto cmd_timer = node->create_wall_timer(
       std::chrono::milliseconds(10),
       cmdCallback);

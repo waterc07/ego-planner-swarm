@@ -98,6 +98,7 @@ bool AStar::ConvertToIndexAndAdjustStartEndPoints(Vector3d start_pt, Vector3d en
         // RCLCPP_WARN(rclcpp::get_logger("ConvertToIndexAndAdjustStartEndPoints"), "Start point is insdide an obstacle.");
         do
         {
+            if (budgetExpired()) return false;
             start_pt = (start_pt - end_pt).normalized() * step_size_ + start_pt;
             if (!Coord2Index(start_pt, start_idx))
                 return false;
@@ -109,6 +110,7 @@ bool AStar::ConvertToIndexAndAdjustStartEndPoints(Vector3d start_pt, Vector3d en
         // RCLCPP_WARN(rclcpp::get_logger("ConvertToIndexAndAdjustStartEndPoints"), "End point is insdide an obstacle.");
         do
         {
+            if (budgetExpired()) return false;
             end_pt = (end_pt - start_pt).normalized() * step_size_ + end_pt;
             if (!Coord2Index(end_pt, end_idx))
                 return false;
@@ -127,6 +129,7 @@ bool AStar::AstarSearch(const double step_size, Vector3d start_pt, Vector3d end_
     inv_step_size_ = 1 / step_size;
     center_ = (start_pt + end_pt) / 2;
 
+    if (budgetExpired()) return false;
     Vector3i start_idx, end_idx;
     if (!ConvertToIndexAndAdjustStartEndPoints(start_pt, end_pt, start_idx, end_idx))
     {
@@ -161,6 +164,7 @@ bool AStar::AstarSearch(const double step_size, Vector3d start_pt, Vector3d end_
     int num_iter = 0;
     while (!openSet_.empty())
     {
+        if (budgetExpired()) return false;
         num_iter++;
         current = openSet_.top();
         openSet_.pop();

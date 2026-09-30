@@ -38,6 +38,9 @@ namespace ego_planner
 
     void initPlanModules(rclcpp::Node::SharedPtr &node, PlanningVisualization::Ptr vis = NULL);
 
+    void beginPlanningCycle() { bspline_optimizer_->a_star_->beginBudget(compute_budget_s_); }
+    bool planningBudgetExpired() const { return bspline_optimizer_->a_star_->budgetExpired(); }
+
     void deliverTrajToOptimizer(void) { bspline_optimizer_->setSwarmTrajs(&swarm_trajs_buf_); };
 
     void setDroneIdtoOpt(void) { bspline_optimizer_->setDroneId(pp_.drone_id); }
@@ -62,6 +65,8 @@ namespace ego_planner
 
     BsplineOptimizer::Ptr bspline_optimizer_;
 
+    double start_velocity_tolerance_ = 0.0;
+    double compute_budget_s_{0.0};
     int continous_failures_count_{0};
 
     void updateTrajInfo(const UniformBspline &position_traj, const rclcpp::Time time_now);
