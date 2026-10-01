@@ -1,3 +1,4 @@
+#include "ego_planner/trajectory_validation.h"
 #include "ego_planner/process_session.h"
 #include "ego_planner/local_target.h"
 
@@ -704,6 +705,12 @@ namespace ego_planner
       t_cur = std::min(info->duration_, t_cur);
 
       Eigen::Vector3d pos = info->position_traj_.evaluateDeBoorT(t_cur);
+      const bool periodic_replan = require_session_
+          ? periodicReplanDue(t_cur, replan_thresh_, info->duration_,
+                (odom_pos_ - info->position_traj_.evaluateDeBoorT(0.0)).norm(),
+                planner_manager_->pp_.ctrl_pt_dist)
+          : t_cur > replan_thresh_;
+
 
       /* && (end_pt_ - pos).norm() < 0.5 */
       if ((target_type_ == TARGET_TYPE::PRESET_TARGET) &&
@@ -729,12 +736,12 @@ namespace ego_planner
           changeFSMExecState(WAIT_TARGET, "FSM");
           goto force_return;
         }
-        else if ((end_pt_ - pos).norm() > no_replan_thresh_ && t_cur > replan_thresh_)
+        else if ((end_pt_ - pos).norm() > no_replan_thresh_ && periodic_replan)
         {
           changeFSMExecState(REPLAN_TRAJ, "FSM");
         }
       }
-      else if (t_cur > replan_thresh_)
+      else if (periodic_replan)
       {
         changeFSMExecState(REPLAN_TRAJ, "FSM");
       }

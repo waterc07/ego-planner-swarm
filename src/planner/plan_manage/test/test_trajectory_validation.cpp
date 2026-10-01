@@ -7,6 +7,12 @@ void require(bool ok, const char* message) {
   if (!ok) throw std::runtime_error(message);
 }
 int main() {
+  require(!periodicReplanDue(1.1, 1, 8, 0.05, 0.5), "acceleration segment prematurely retired");
+  require(!periodicReplanDue(0.8, 1, 8, 0.6, 0.5), "minimum replan interval bypassed");
+  require(periodicReplanDue(1.1, 1, 8, 0.5, 0.5), "measured progress did not trigger replan");
+  require(periodicReplanDue(7.1, 1, 8, 0, 0.5), "expiring stationary curve never refreshed");
+  require(periodicReplanDue(2, 1, 8, std::numeric_limits<double>::quiet_NaN(), 0.5),
+          "invalid progress silently suppressed replan");
   const Eigen::Vector3d start(0,0,1), desired(3,0,1), goal(10,0,1);
   const auto empty = [](const Eigen::Vector3d&) { return true; };
   auto target = selectLocalTarget(start, desired, goal, 1.5, 0.2, empty);
@@ -31,6 +37,26 @@ int main() {
 
   Eigen::MatrixXd pts(3,6);
   for(int i=0;i<6;++i) pts.col(i)=Eigen::Vector3d(i,i,0.5);
+  const Eigen::Vector3d measured_position(-4, 2, 1.5), measured_velocity(0.2, -0.1, 0.05);
+  const Eigen::Vector3d measured_acceleration(0.1, 0.04, -0.02);
+  for (double dt : {0.1, 0.7, 1.5}) {
+    auto controls = pts;
+    require(anchorCubicStart(controls, dt, measured_position, measured_velocity, measured_acceleration),
+            "measured boundary rejected");
+    UniformBspline anchored(controls, 3, dt);
+    require((anchored.evaluateDeBoorT(0) - measured_position).norm() < 1e-10,
+            "warm start retained stale position");
+    auto derivative = anchored.getDerivative();
+    require((derivative.evaluateDeBoorT(0) - measured_velocity).norm() < 1e-10,
+            "warm start retained stale velocity");
+    require((derivative.getDerivative().evaluateDeBoorT(0) - measured_acceleration).norm() < 1e-10,
+            "warm start retained stale acceleration");
+    require((controls.rightCols(3) - pts.rightCols(3)).norm() == 0, "warm-start tail changed");
+  }
+  auto invalid_controls = pts;
+  require(!anchorCubicStart(invalid_controls, 0, measured_position, measured_velocity, measured_acceleration),
+          "invalid interval accepted");
+  require((invalid_controls - pts).norm() == 0, "invalid interval mutated controls");
   UniformBspline curve(pts,3,1.0);
   auto bounds=trajectoryBounds(curve);
   require(bounds.velocity>1.4, "diagonal speed exceeds per-axis limit");

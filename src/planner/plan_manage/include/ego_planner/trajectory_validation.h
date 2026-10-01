@@ -4,6 +4,30 @@
 #include <functional>
 #include <limits>
 namespace ego_planner {
+// Cubic start state fixes the first three controls; retain the remaining warm-start shape.
+inline bool anchorCubicStart(Eigen::MatrixXd& controls, double interval,
+                            const Eigen::Vector3d& position, const Eigen::Vector3d& velocity,
+                            const Eigen::Vector3d& acceleration) {
+  if (controls.rows() != 3 || controls.cols() < 4 || !controls.allFinite() ||
+      !position.allFinite() || !velocity.allFinite() || !acceleration.allFinite() ||
+      !std::isfinite(interval) || interval <= 0) return false;
+  const Eigen::Vector3d middle = position - acceleration * interval * interval / 6.0;
+  controls.col(0) = middle - velocity * interval + acceleration * interval * interval / 2.0;
+  controls.col(1) = middle;
+  controls.col(2) = middle + velocity * interval + acceleration * interval * interval / 2.0;
+  return controls.allFinite();
+}
+// Periodic refresh must not repeatedly discard the initial acceleration segment.
+// Collision-triggered replanning is independent of this scheduling predicate.
+inline bool periodicReplanDue(double elapsed, double interval, double duration,
+                              double measured_progress, double control_spacing) {
+  if (!std::isfinite(elapsed) || !std::isfinite(interval) || !std::isfinite(duration) ||
+      !std::isfinite(measured_progress) || !std::isfinite(control_spacing) ||
+      interval <= 0 || duration <= 0 || measured_progress < 0 || control_spacing <= 0)
+    return true;
+  return elapsed > interval &&
+      (measured_progress >= control_spacing || elapsed >= duration - interval);
+}
 // Nonnegative basis sums to one: control-point norms bound the ENTIRE interval.
 inline double derivativeNormBound(UniformBspline curve) {
   const auto points = curve.getControlPoint();

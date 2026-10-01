@@ -1,4 +1,5 @@
 #include <stdexcept>
+#include <algorithm>
 #include "ego_planner/trajectory_validation.h"
 // #include <fstream>
 #include <ego_planner/planner_manager.h>
@@ -81,6 +82,7 @@ namespace ego_planner
     vector<Eigen::Vector3d> point_set, start_end_derivatives;
     static bool flag_first_call = true, flag_force_polynomial = false;
     bool flag_regenerate = false;
+    bool used_polynomial = false;
     do
     {
       point_set.clear();
@@ -90,6 +92,7 @@ namespace ego_planner
       // 这里如果正常进入if（通常为初次生成），则do部分只进行一次，即只清空一次点集；若进入else则有可能对异常情况重置flag_regenerate并再do一次
       if (flag_first_call || flag_polyInit || flag_force_polynomial /*|| ( start_pt - local_target_pt ).norm() < 1.0*/) // Initial path generated from a min-snap traj by order.
       {
+        used_polynomial = true;
         flag_first_call = false;
         flag_force_polynomial = false;
         // 用于存储生成的轨迹
@@ -149,9 +152,11 @@ namespace ego_planner
       }
       else // Initial path generated from previous trajectory.
       {
+        used_polynomial = false;
 
         double t;
-        double t_cur = (rclcpp::Clock().now() - local_data_.start_time_).seconds();
+        double t_cur = std::clamp((rclcpp::Clock().now() - local_data_.start_time_).seconds(),
+                                  0.0, local_data_.duration_);
 
         vector<double> pseudo_arc_length;
         vector<Eigen::Vector3d> segment_point;
@@ -190,6 +195,12 @@ namespace ego_planner
           }
         }
 
+        if (segment_point.size() < 2) {
+          flag_force_polynomial = true;
+          flag_regenerate = true;
+          continue;
+        }
+
         double sample_length = 0;
         double cps_dist = pp_.ctrl_pt_dist * 1.5; // cps_dist will be divided by 1.5 in the next
         size_t id = 0;
@@ -213,9 +224,10 @@ namespace ego_planner
           point_set.push_back(local_target_pt);
         } while (point_set.size() < 7); // If the start point is very close to end point, this will help
 
-        start_end_derivatives.push_back(local_data_.velocity_traj_.evaluateDeBoorT(t_cur));
+        point_set.front() = start_pt;
+        start_end_derivatives.push_back(start_vel);
         start_end_derivatives.push_back(local_target_vel);
-        start_end_derivatives.push_back(local_data_.acceleration_traj_.evaluateDeBoorT(t_cur));
+        start_end_derivatives.push_back(start_acc);
         start_end_derivatives.push_back(Eigen::Vector3d::Zero());
 
         if (point_set.size() > pp_.planning_horizen_ / pp_.ctrl_pt_dist * 3) // The initial path is unnormally too long!
@@ -229,6 +241,7 @@ namespace ego_planner
     // 将轨迹变为B样条轨迹
     Eigen::MatrixXd ctrl_pts, ctrl_pts_temp;
     UniformBspline::parameterizeToBspline(ts, point_set, start_end_derivatives, ctrl_pts);
+    if (!anchorCubicStart(ctrl_pts, ts, start_pt, start_vel, start_acc)) return false;
 
     vector<std::pair<int, int>> segments;
     segments = bspline_optimizer_->initControlPoints(ctrl_pts, true);
@@ -363,6 +376,11 @@ namespace ego_planner
     }
     t_refine = rclcpp::Clock().now() - t_start;
     if (planningBudgetExpired()) return false;
+    RCLCPP_INFO(rclcpp::get_logger("ego_planner"),
+      "BB_TRAJECTORY_START initializer=%s delta_pos=%.6f delta_vel=%.6f",
+      used_polynomial ? "polynomial" : "warm_start",
+      (pos.evaluateDeBoorT(0.0) - start_pt).norm(),
+      (pos.getDerivative().evaluateDeBoorT(0.0) - start_vel).norm());
     // Exactly one ID and start-time update per accepted candidate.
     updateTrajInfo(pos, rclcpp::Clock().now());
 
