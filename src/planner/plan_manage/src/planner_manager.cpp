@@ -30,7 +30,6 @@ namespace ego_planner
     node->declare_parameter("manager/control_points_distance", -1.0);
     node->declare_parameter("manager/planning_horizon", 5.0);
     node->declare_parameter("manager/use_distinctive_trajs", false);
-    node->declare_parameter("manager/drone_id", -1);
 
     node->get_parameter("manager/max_vel", pp_.max_vel_);
     node->get_parameter("manager/max_acc", pp_.max_acc_);
@@ -39,7 +38,6 @@ namespace ego_planner
     node->get_parameter("manager/control_points_distance", pp_.ctrl_pt_dist);
     node->get_parameter("manager/planning_horizon", pp_.planning_horizen_);
     node->get_parameter("manager/use_distinctive_trajs", pp_.use_distinctive_trajs);
-    node->get_parameter("manager/drone_id", pp_.drone_id);
 
     local_data_.traj_id_ = 0;
     grid_map_.reset(new GridMap);
@@ -61,7 +59,7 @@ namespace ego_planner
                                         Eigen::Vector3d local_target_vel, bool flag_polyInit, bool flag_randomPolyTraj)
   {
     static int count = 0;
-    printf("\033[47;30m\n[drone %d replan %d]==============================================\033[0m\n", pp_.drone_id, count++);
+    printf("\033[47;30m\n[replan %d]==============================================\033[0m\n", count++);
 
     if ((start_pt - local_target_pt).norm() < 0.2)
     {
@@ -333,7 +331,7 @@ namespace ego_planner
                  bounds.velocity <= v_allow && bounds.acceleration <= a_allow;
         },
         [&]() {
-          if (pp_.drone_id > 0 || !std::isfinite(bounds.velocity) ||
+          if (!std::isfinite(bounds.velocity) ||
               !std::isfinite(bounds.acceleration)) return false;
           const double ratio = std::max(1.02, std::max(bounds.velocity / v_allow,
                                                      std::sqrt(bounds.acceleration / a_allow)));
@@ -412,30 +410,7 @@ namespace ego_planner
     return true;
   }
 
-  bool EGOPlannerManager::checkCollision(int drone_id)
-  {
-    // if (local_data_.start_time_.toSec() < 1e9) // It means my first planning has not started
-    if (local_data_.start_time_.seconds() < 1e9)
-      return false;
 
-    // double my_traj_start_time = local_data_.start_time_.toSec();
-    // double other_traj_start_time = swarm_trajs_buf_[drone_id].start_time_.toSec();
-    double my_traj_start_time = local_data_.start_time_.seconds();
-    double other_traj_start_time = swarm_trajs_buf_[drone_id].start_time_.seconds();
-
-    double t_start = max(my_traj_start_time, other_traj_start_time);
-    double t_end = min(my_traj_start_time + local_data_.duration_ * 2 / 3, other_traj_start_time + swarm_trajs_buf_[drone_id].duration_);
-
-    for (double t = t_start; t < t_end; t += 0.03)
-    {
-      if ((local_data_.position_traj_.evaluateDeBoorT(t - my_traj_start_time) - swarm_trajs_buf_[drone_id].position_traj_.evaluateDeBoorT(t - other_traj_start_time)).norm() < bspline_optimizer_->getSwarmClearance())
-      {
-        return true;
-      }
-    }
-
-    return false;
-  }
 
   bool EGOPlannerManager::planGlobalTrajWaypoints(const Eigen::Vector3d &start_pos, const Eigen::Vector3d &start_vel, const Eigen::Vector3d &start_acc,
                                                   const std::vector<Eigen::Vector3d> &waypoints, const Eigen::Vector3d &end_vel, const Eigen::Vector3d &end_acc)

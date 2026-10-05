@@ -24,7 +24,6 @@ def generate_launch_description():
     p_num = LaunchConfiguration('p_num', default=20)
     min_dist = LaunchConfiguration('min_dist', default=1.0)
     odometry_topic = LaunchConfiguration('odometry_topic', default='visual_slam/odom')
-    drone_id = LaunchConfiguration('drone_id', default=0)
 
     # DeclareLaunchArguments
     init_x_arg = DeclareLaunchArgument('init_x_', default_value=init_x, description='Initial X position')
@@ -38,7 +37,6 @@ def generate_launch_description():
     p_num_arg = DeclareLaunchArgument('p_num', default_value=p_num, description='Polygon number')
     min_dist_arg = DeclareLaunchArgument('min_dist', default_value=min_dist, description='Minimum distance')
     odometry_topic_arg = DeclareLaunchArgument('odometry_topic', default_value=odometry_topic, description='Odometry topic')
-    drone_id_arg = DeclareLaunchArgument('drone_id', default_value=drone_id, description='Drone ID')
     
     # 地图属性以及是否使用动力学仿真
     use_mockamap = LaunchConfiguration('use_mockamap', default=False) # map_generator or mockamap 
@@ -108,16 +106,16 @@ def generate_launch_description():
     # dynamic
     so3_quadrotor_simulator = launch_ros.actions.Node(
         package='so3_quadrotor_simulator', executable='so3_quadrotor_simulator',
-        output='screen', name=['drone_', drone_id, '_quadrotor_simulator_so3'], 
+        output='screen', name='quadrotor_simulator_so3',
         parameters=[{'rate/odom': 100.0},
                     {'simulator/init_state_x': init_x},
                     {'simulator/init_state_y': init_y},
                     {'simulator/init_state_z': init_z}],
         
-        remappings=[('odom', ['drone_', drone_id, '_visual_slam/odom']),
-                    ('cmd', ['drone_', drone_id, '_so3_cmd']),
-                    ('force_disturbance', ['drone_', drone_id,'_force_disturbance']),
-                    ('moment_disturbance', ['drone_', drone_id,'_moment_disturbance'])],
+        remappings=[('odom', 'visual_slam/odom'),
+                    ('cmd', 'so3_cmd'),
+                    ('force_disturbance', 'force_disturbance'),
+                    ('moment_disturbance', 'moment_disturbance')],
         condition = IfCondition(use_dynamic)
         ) 
     
@@ -135,7 +133,7 @@ def generate_launch_description():
     so3_control_component = launch_ros.descriptions.ComposableNode(
             package='so3_control', 
             plugin='SO3ControlComponent',
-            name=['drone_', drone_id, '_so3_control_component'],
+            name='so3_control_component',
             parameters=[
                 {'so3_control/init_state_x': init_x},
                 {'so3_control/init_state_y': init_y},
@@ -148,16 +146,16 @@ def generate_launch_description():
                 gains_file,
                 corrections_file
             ],
-            remappings=[('odom', ['drone_', drone_id, '_visual_slam/odom']),
-                        ('position_cmd', ['drone_', drone_id, '_planning/pos_cmd']),
-                        ('motors', ['drone_', drone_id, '_motors']),
-                        ('corrections', ['drone_', drone_id, '_corrections']),
-                        ('so3_cmd', ['drone_', drone_id, '_so3_cmd'])],
+            remappings=[('odom', 'visual_slam/odom'),
+                        ('position_cmd', 'planning/pos_cmd'),
+                        ('motors', 'motors'),
+                        ('corrections', 'corrections'),
+                        ('so3_cmd', 'so3_cmd')],
             condition = IfCondition(use_dynamic)
             )
     
     so3_control_container = ComposableNodeContainer(
-            name=['drone_', drone_id, '_so3_control_container'],
+            name='so3_control_container',
             namespace='',
             package='rclcpp_components',
             executable='component_container',
@@ -171,7 +169,7 @@ def generate_launch_description():
     poscmd_2_odom_node = Node(
         package='poscmd_2_odom',
         executable='poscmd_2_odom',
-        name=['drone_', drone_id, '_poscmd_2_odom'],
+        name='poscmd_2_odom',
         output='screen',
         parameters=[
             {'init_x': init_x},
@@ -179,8 +177,8 @@ def generate_launch_description():
             {'init_z': init_z}
         ],
         remappings=[
-            ('command', ['drone_', drone_id, '_planning/pos_cmd']),
-            ('odometry', ['drone_', drone_id, '_', odometry_topic])
+            ('command', 'planning/pos_cmd'),
+            ('odometry', odometry_topic)
         ],
         condition = UnlessCondition(use_dynamic)
     )
@@ -188,20 +186,20 @@ def generate_launch_description():
     odom_visualization_node = Node(
         package='odom_visualization',
         executable='odom_visualization',
-        name=['drone_', drone_id, '_odom_visualization'],
+        name='odom_visualization',
         output='screen',
         remappings=[
-            ('odom', ['drone_', drone_id, '_visual_slam/odom']),
-            ('robot', ['drone_', drone_id, '_vis/robot']),
-            ('path', ['drone_', drone_id, '_vis/path']),
-            ('time_gap', ['drone_', drone_id, '_vis/time_gap']),
-            # ('pose', ['drone_', drone_id, '_vis/pose']),
-            # ('velocity', ['drone_', drone_id, '_vis/velocity']),
-            # ('covariance', ['drone_', drone_id, '_vis/covariance']),
-            # ('covariance_velocity', ['drone_', drone_id, '_vis/covariance_velocity']),
-            # ('trajectory', ['drone_', drone_id, '_vis/trajectory']),
-            # ('sensor', ['drone_', drone_id, '_vis/sensor']),
-            # ('height', ['drone_', drone_id, '_vis/height']),
+            ('odom', 'visual_slam/odom'),
+            ('robot', 'vis/robot'),
+            ('path', 'vis/path'),
+            ('time_gap', 'vis/time_gap'),
+            # ('pose', 'vis/pose'),
+            # ('velocity', 'vis/velocity'),
+            # ('covariance', 'vis/covariance'),
+            # ('covariance_velocity', 'vis/covariance_velocity'),
+            # ('trajectory', 'vis/trajectory'),
+            # ('sensor', 'vis/sensor'),
+            # ('height', 'vis/height'),
         ],
         parameters=[
             {'color/a': 1.0},
@@ -211,7 +209,6 @@ def generate_launch_description():
             {'covariance_scale': 100.0},
             {'robot_scale': 1.0},
             {'tf45': False},
-            {'drone_id': drone_id}
         ]
     )
     
@@ -224,7 +221,7 @@ def generate_launch_description():
     pcl_render_node = Node(
         package='local_sensing',
         executable='pcl_render_node',
-        name=['drone_', drone_id, '_pcl_render_node'],
+        name='pcl_render_node',
         output='screen',
         parameters=[
             {'sensing_horizon': 5.0},
@@ -237,9 +234,9 @@ def generate_launch_description():
         ],
         remappings=[
             ('global_map', '/map_generator/global_cloud'),
-            ('odometry', ['drone_', drone_id, '_', odometry_topic]),
-            ('pcl_render_node/cloud', ['drone_', drone_id, '_pcl_render_node/cloud']),
-            ('depth', ['drone_', drone_id, '_pcl_render_node/depth'])
+            ('odometry', odometry_topic),
+            ('pcl_render_node/cloud', 'pcl_render_node/cloud'),
+            ('depth', 'pcl_render_node/depth')
         ]
     )
 
@@ -258,7 +255,6 @@ def generate_launch_description():
     ld.add_action(p_num_arg)
     ld.add_action(min_dist_arg)
     ld.add_action(odometry_topic_arg)
-    ld.add_action(drone_id_arg)
     
     ld.add_action(use_mockamap_arg)
     ld.add_action(use_dynamic_arg)

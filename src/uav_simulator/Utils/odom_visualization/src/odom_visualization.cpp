@@ -53,7 +53,6 @@ visualization_msgs::msg::Marker sensorROS;
 visualization_msgs::msg::Marker meshROS;
 sensor_msgs::msg::Range heightROS;
 string _frame_id;
-int _drone_id;
 
 // debug
 rclcpp::Time debug_time = rclcpp::Clock().now();
@@ -406,10 +405,10 @@ void odom_callback(const nav_msgs::msg::Odometry::SharedPtr msg)
         transform90.setRotation(tf2::Quaternion(q90(1), q90(2), q90(3), q90(0)));
 
         // 定义帧 ID
-        std::string base_s = _drone_id == -1 ? "base" : "base" + std::to_string(_drone_id);
-        std::string laser_s = _drone_id == -1 ? "laser" : "laser" + std::to_string(_drone_id);
-        std::string vision_s = _drone_id == -1 ? "vision" : "vision" + std::to_string(_drone_id);
-        std::string height_s = _drone_id == -1 ? "height" : "height" + std::to_string(_drone_id);
+        std::string base_s = "base";
+        std::string laser_s = "laser";
+        std::string vision_s = "vision";
+        std::string height_s = "height";
 
         // 发布 world -> base_s
         geometry_msgs::msg::TransformStamped transformStamped;
@@ -522,7 +521,6 @@ int main(int argc, char **argv)
     node->declare_parameter("covariance_position", false);
     node->declare_parameter("covariance_velocity", false);
     node->declare_parameter("covariance_color", false);
-    node->declare_parameter("drone_id", -1);
 
     node->get_parameter("mesh_resource", mesh_resource);
     node->get_parameter("color/r", color_r);
@@ -539,7 +537,6 @@ int main(int argc, char **argv)
     node->get_parameter("covariance_position", cov_pos);
     node->get_parameter("covariance_velocity", cov_vel);
     node->get_parameter("covariance_color", cov_color);
-    node->get_parameter("drone_id", _drone_id);
 
 
     // 发布者和订阅者

@@ -17,7 +17,6 @@ def generate_launch_description():
     target_x = LaunchConfiguration('target_x', default=20.0)
     target_y = LaunchConfiguration('target_y', default=20.0)
     target_z = LaunchConfiguration('target_z', default=1.0)
-    drone_id = LaunchConfiguration('drone_id', default=0)
     odom_topic = LaunchConfiguration('odom_topic', default='visual_slam/odom')
     obj_num = LaunchConfiguration('obj_num', default=10)
 
@@ -31,7 +30,6 @@ def generate_launch_description():
     target_x_cmd = DeclareLaunchArgument('target_x', default_value=target_x, description='Target x position')
     target_y_cmd = DeclareLaunchArgument('target_y', default_value=target_y, description='Target y position')
     target_z_cmd = DeclareLaunchArgument('target_z', default_value=target_z, description='Target z position')
-    drone_id_cmd = DeclareLaunchArgument('drone_id', default_value=drone_id, description='ID of the drone')
     odom_topic_cmd = DeclareLaunchArgument('odom_topic', default_value=odom_topic, description='Odometry topic')
     obj_num_cmd = DeclareLaunchArgument('obj_num', default_value=obj_num, description='Number of moving objects')
 
@@ -43,7 +41,6 @@ def generate_launch_description():
         PythonLaunchDescriptionSource(os.path.join(
             get_package_share_directory('ego_planner'), 'launch', 'advanced_param.launch.py')),
         launch_arguments={
-            'drone_id': drone_id,
             'map_size_x_': map_size_x,
             'map_size_y_': map_size_y,
             'map_size_z_': map_size_z,
@@ -88,11 +85,11 @@ def generate_launch_description():
     traj_server_node = Node(
         package='ego_planner',
         executable='traj_server',
-        name=['drone_', drone_id, '_traj_server'],
+        name='traj_server',
         output='screen',
         remappings=[
-            ('position_cmd', ['drone_', drone_id, '_planning/pos_cmd']),
-            ('planning/bspline', ['drone_', drone_id, '_planning/bspline'])
+            ('position_cmd', 'planning/pos_cmd'),
+            ('planning/bspline', 'planning/bspline')
         ],
         parameters=[
             {'traj_server/time_forward': 1.0}
@@ -104,7 +101,6 @@ def generate_launch_description():
         os.path.join(get_package_share_directory('ego_planner'), 'launch', 'simulator.launch.py')),
         launch_arguments={
             'use_dynamic_cmd': use_dynamic,
-            'drone_id': drone_id,
             'map_size_x_': map_size_x,
             'map_size_y_': map_size_y,
             'map_size_z_': map_size_z,
@@ -151,7 +147,6 @@ def generate_launch_description():
     ld.add_action(target_x_cmd)
     ld.add_action(target_y_cmd)
     ld.add_action(target_z_cmd)
-    ld.add_action(drone_id_cmd)
     ld.add_action(odom_topic_cmd)
     ld.add_action(obj_num_cmd)
     ld.add_action(use_dynamic_cmd)

@@ -20,7 +20,6 @@
 #include "bspline_opt/bspline_optimizer.h"
 #include "plan_env/grid_map.h"
 #include "traj_utils/msg/bspline.hpp"
-#include "traj_utils/msg/multi_bsplines.hpp"
 #include "geometry_msgs/msg/pose_stamped.hpp"
 #include "traj_utils/msg/data_disp.hpp"
 #include "ego_planner/planner_manager.h"
@@ -46,7 +45,6 @@ namespace ego_planner
       REPLAN_TRAJ,
       EXEC_TRAJ,
       EMERGENCY_STOP,
-      SEQUENTIAL_START
     };
     enum TARGET_TYPE
     {
@@ -59,7 +57,6 @@ namespace ego_planner
     EGOPlannerManager::Ptr planner_manager_;
     PlanningVisualization::Ptr visualization_;
     traj_utils::msg::DataDisp data_disp_;
-    traj_utils::msg::MultiBsplines multi_bspline_msgs_buf_;
 
     /* parameters */
     int target_type_; // 1 mannual select, 2 hard code
@@ -72,7 +69,7 @@ namespace ego_planner
     bool enable_fail_safe_;
 
     /* planning data */
-    bool have_trigger_, have_target_, have_odom_, have_new_target_, have_recv_pre_agent_;
+    bool have_trigger_, have_target_, have_odom_, have_new_target_;
     FSM_EXEC_STATE exec_state_;
     int continously_called_times_{0};
 
@@ -93,16 +90,12 @@ namespace ego_planner
 
     rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr waypoint_sub_;
     rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub_;
-    rclcpp::Subscription<traj_utils::msg::MultiBsplines>::SharedPtr swarm_trajs_sub_;
-    rclcpp::Subscription<traj_utils::msg::Bspline>::SharedPtr broadcast_bspline_sub_;
     rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr trigger_sub_;
 
     // rclcpp::Publisher<std_msgs::msg::Empty>::SharedPtr replan_pub_;
     // rclcpp::Publisher<std_msgs::msg::Empty>::SharedPtr new_pub_;
     rclcpp::Publisher<traj_utils::msg::Bspline>::SharedPtr bspline_pub_;
     rclcpp::Publisher<traj_utils::msg::DataDisp>::SharedPtr data_disp_pub_;
-    rclcpp::Publisher<traj_utils::msg::MultiBsplines>::SharedPtr swarm_trajs_pub_;
-    rclcpp::Publisher<traj_utils::msg::Bspline>::SharedPtr broadcast_bspline_pub_;
 
     /* helper functions */
     bool callReboundReplan(bool flag_use_poly_init, bool flag_randomPolyTraj); // front-end and back-end method
@@ -125,11 +118,7 @@ namespace ego_planner
     void waypointCallback(const std::shared_ptr<const geometry_msgs::msg::PoseStamped> &msg);
     void triggerCallback(const std::shared_ptr<const geometry_msgs::msg::PoseStamped> &msg);
     void odometryCallback(const std::shared_ptr<const nav_msgs::msg::Odometry> &msg);
-    void swarmTrajsCallback(const std::shared_ptr<const traj_utils::msg::MultiBsplines> &msg);
-    void BroadcastBsplineCallback(const std::shared_ptr<const traj_utils::msg::Bspline> &msg);
 
-    bool checkCollision();
-    void publishSwarmTrajs(bool startup_pub);
 
   public:
     EGOReplanFSM(/* args */)

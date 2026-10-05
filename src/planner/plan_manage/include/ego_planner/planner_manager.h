@@ -41,13 +41,9 @@ namespace ego_planner
     void beginPlanningCycle() { bspline_optimizer_->a_star_->beginBudget(compute_budget_s_); }
     bool planningBudgetExpired() const { return bspline_optimizer_->a_star_->budgetExpired(); }
 
-    void deliverTrajToOptimizer(void) { bspline_optimizer_->setSwarmTrajs(&swarm_trajs_buf_); };
 
-    void setDroneIdtoOpt(void) { bspline_optimizer_->setDroneId(pp_.drone_id); }
 
-    double getSwarmClearance(void) { return bspline_optimizer_->getSwarmClearance(); }
 
-    bool checkCollision(int drone_id);
     
 
     PlanParameters pp_;
@@ -55,7 +51,6 @@ namespace ego_planner
     GlobalTrajData global_data_;
     GridMap::Ptr grid_map_;
     fast_planner::ObjPredictor::Ptr obj_predictor_;    
-    SwarmTrajData swarm_trajs_buf_;
 
   private:
     /* main planning algorithms & modules */

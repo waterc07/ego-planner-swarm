@@ -28,7 +28,6 @@ from launch_ros.parameter_descriptions import ParameterValue
 
 
 def generate_launch_description():
-    drone_id = LaunchConfiguration("drone_id")
     cx = ParameterValue(LaunchConfiguration("cx"), value_type=float)
     cy = ParameterValue(LaunchConfiguration("cy"), value_type=float)
     fx = ParameterValue(LaunchConfiguration("fx"), value_type=float)
@@ -65,7 +64,6 @@ def generate_launch_description():
         DeclareLaunchArgument("ready_min_fusion_updates", default_value="5"),
         DeclareLaunchArgument("use_camera_info", default_value="true"),
         DeclareLaunchArgument("position_cmd_topic", default_value="/boom_birds/ego/position_cmd"),
-        DeclareLaunchArgument("drone_id", default_value="0"),
         DeclareLaunchArgument("map_size_x", default_value="40.0"),
         DeclareLaunchArgument("map_size_y", default_value="40.0"),
         DeclareLaunchArgument("map_size_z", default_value="6.0"),
@@ -90,7 +88,7 @@ def generate_launch_description():
     planner = Node(
         package="ego_planner",
         executable="ego_planner_node",
-        name=["drone_", drone_id, "_ego_planner_node"],
+        name='ego_planner_node',
         output="screen",
         remappings=[
             ("/boom_birds/planner/request", LaunchConfiguration("planner_request_topic")),
@@ -109,8 +107,6 @@ def generate_launch_description():
             ("grid_map/occupancy_inflate", "/boom_birds/ego/grid_map/occupancy_inflate"),
             ("planning/bspline", "/boom_birds/ego/planning/bspline"),
             ("planning/data_display", "/boom_birds/ego/planning/data_display"),
-            ("planning/broadcast_bspline_from_planner", "/boom_birds/ego/broadcast_bspline"),
-            ("planning/broadcast_bspline_to_planner", "/boom_birds/ego/broadcast_bspline"),
         ],
         parameters=[
             {"fsm/flight_type": 2},
@@ -173,14 +169,12 @@ def generate_launch_description():
             {"manager/feasibility_tolerance": 0.05},
             {"manager/planning_horizon": ParameterValue(LaunchConfiguration("planning_horizon"), value_type=float)},
             {"manager/use_distinctive_trajs": True},
-            {"manager/drone_id": 0},
             {"optimization/full_path_collision_check": True},
             {"optimization/lambda_smooth": 1.0},
             {"optimization/lambda_collision": 0.5},
             {"optimization/lambda_feasibility": 0.1},
             {"optimization/lambda_fitness": 1.0},
             {"optimization/dist0": ParameterValue(LaunchConfiguration("obstacle_clearance"), value_type=float)},
-            {"optimization/swarm_clearance": 0.5},
             {"optimization/max_vel": max_vel},
             {"optimization/max_acc": max_acc},
             {"bspline/limit_vel": max_vel},
