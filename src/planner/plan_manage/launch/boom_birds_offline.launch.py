@@ -82,6 +82,8 @@ def generate_launch_description():
         DeclareLaunchArgument("obstacle_clearance", default_value="0.5"),
         DeclareLaunchArgument("depth_pose_tolerance_s", default_value="0.03"),
         DeclareLaunchArgument("resolution", default_value="0.1"),
+        DeclareLaunchArgument("skip_pixel", default_value="1"),
+        DeclareLaunchArgument("use_distinctive_trajs", default_value="true"),
         DeclareLaunchArgument("max_ray_length", default_value="4.5"),
     ]
 
@@ -146,7 +148,7 @@ def generate_launch_description():
             {"grid_map/depth_filter_mindist": 0.2},
             {"grid_map/depth_filter_margin": 2},
             {"grid_map/k_depth_scaling_factor": 1000.0},
-            {"grid_map/skip_pixel": 1},
+            {"grid_map/skip_pixel": ParameterValue(LaunchConfiguration("skip_pixel"), value_type=int)},
             {"grid_map/p_hit": 0.65},
             {"grid_map/p_miss": 0.35},
             {"grid_map/p_min": 0.12},
@@ -168,7 +170,7 @@ def generate_launch_description():
             {"manager/control_points_distance": 0.4},
             {"manager/feasibility_tolerance": 0.05},
             {"manager/planning_horizon": ParameterValue(LaunchConfiguration("planning_horizon"), value_type=float)},
-            {"manager/use_distinctive_trajs": True},
+            {"manager/use_distinctive_trajs": ParameterValue(LaunchConfiguration("use_distinctive_trajs"), value_type=bool)},
             {"optimization/full_path_collision_check": True},
             {"optimization/lambda_smooth": 1.0},
             {"optimization/lambda_collision": 0.5},
@@ -204,6 +206,8 @@ def generate_launch_description():
     )
 
     def select_geometry(context):
+        if int(LaunchConfiguration("skip_pixel").perform(context)) < 1:
+            raise ValueError("skip_pixel must be positive")
         dynamic = LaunchConfiguration("use_camera_info").perform(context).lower() == "true"
         values = {k: float(LaunchConfiguration(k).perform(context)) for k in ("fx", "fy", "cx", "cy")}
         if dynamic and any(v != -1.0 for v in values.values()):
