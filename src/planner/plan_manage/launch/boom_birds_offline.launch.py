@@ -67,6 +67,9 @@ def generate_launch_description():
         DeclareLaunchArgument("map_size_x", default_value="40.0"),
         DeclareLaunchArgument("map_size_y", default_value="40.0"),
         DeclareLaunchArgument("map_size_z", default_value="6.0"),
+        DeclareLaunchArgument("map_min_z", default_value="-0.01",
+                              description="Map lower Z in world_frame; not the measured floor height"),
+        DeclareLaunchArgument("virtual_ceil_z", default_value="2.9"),
         DeclareLaunchArgument("cx", default_value="-1.0"),
         DeclareLaunchArgument("cy", default_value="-1.0"),
         DeclareLaunchArgument("fx", default_value="-1.0"),
@@ -136,7 +139,7 @@ def generate_launch_description():
             {"grid_map/local_update_range_z": 4.5},
             {"grid_map/obstacles_inflation": obstacles_inflation},
             {"grid_map/local_map_margin": 10},
-            {"grid_map/ground_height": -0.01},
+            {"grid_map/ground_height": ParameterValue(LaunchConfiguration("map_min_z"), value_type=float)},
             {"grid_map/depth_pose_tolerance_s": ParameterValue(LaunchConfiguration("depth_pose_tolerance_s"), value_type=float)},
             {"grid_map/cx": cx},
             {"grid_map/cy": cy},
@@ -156,7 +159,7 @@ def generate_launch_description():
             {"grid_map/p_occ": 0.80},
             {"grid_map/min_ray_length": 0.1},
             {"grid_map/max_ray_length": max_ray_length},
-            {"grid_map/virtual_ceil_height": 2.9},
+            {"grid_map/virtual_ceil_height": ParameterValue(LaunchConfiguration("virtual_ceil_z"), value_type=float)},
             {"grid_map/visualization_truncate_height": 3.6},
             {"grid_map/show_occ_time": False},
             {"grid_map/pose_type": 1},
@@ -206,6 +209,12 @@ def generate_launch_description():
     )
 
     def select_geometry(context):
+        import math
+        lower, height, ceiling = (float(LaunchConfiguration(k).perform(context))
+                                  for k in ("map_min_z", "map_size_z", "virtual_ceil_z"))
+        if (not all(math.isfinite(v) for v in (lower, height, ceiling))
+                or height <= 0 or not lower < ceiling <= lower + height):
+            raise ValueError("Require finite map_min_z < virtual_ceil_z <= map_min_z + map_size_z")
         if int(LaunchConfiguration("skip_pixel").perform(context)) < 1:
             raise ValueError("skip_pixel must be positive")
         dynamic = LaunchConfiguration("use_camera_info").perform(context).lower() == "true"
