@@ -65,18 +65,23 @@ target_link_libraries( plan_env
   ${OpenCV_LIBS}
 )  
 
-add_executable(obj_generator
-    src/obj_generator.cpp 
-)
-ament_target_dependencies(obj_generator std_msgs visualization_msgs geometry_msgs nav_msgs rclcpp Eigen3 PCL cv_bridge message_filters pcl_conversions)
+option(BB_BUILD_EGO_TOOLS "Build standalone obstacle generator" ON)
+if(BB_BUILD_EGO_TOOLS)
+  add_executable(obj_generator
+      src/obj_generator.cpp
+  )
+  ament_target_dependencies(obj_generator std_msgs visualization_msgs geometry_msgs nav_msgs rclcpp Eigen3 PCL cv_bridge message_filters pcl_conversions)
+endif()
 
 install(TARGETS plan_env
         DESTINATION lib
 )
 
-install(TARGETS obj_generator
-        DESTINATION lib/${PROJECT_NAME}
-)
+if(BB_BUILD_EGO_TOOLS)
+  install(TARGETS obj_generator
+          DESTINATION lib/${PROJECT_NAME}
+  )
+endif()
 
 install(DIRECTORY include/${PROJECT_NAME}/
   DESTINATION include/${PROJECT_NAME}

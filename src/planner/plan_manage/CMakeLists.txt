@@ -87,10 +87,13 @@ install(
 )
 
 # 安装 launch 文件
-install(
-  DIRECTORY launch/
-  DESTINATION share/${PROJECT_NAME}/launch
-)
+option(BB_BUILD_EGO_TOOLS "Install EGO simulation launch files" ON)
+if(BB_BUILD_EGO_TOOLS)
+  install(DIRECTORY launch/ DESTINATION share/${PROJECT_NAME}/launch
+    PATTERN "__pycache__" EXCLUDE PATTERN "*.pyc" EXCLUDE)
+else()
+  install(FILES launch/boom_birds_offline.launch.py DESTINATION share/${PROJECT_NAME}/launch)
+endif()
 
 if(BUILD_TESTING)
   enable_testing()
