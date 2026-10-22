@@ -22,10 +22,10 @@ def parameters(**overrides):
     return {k: v for p in evaluate_parameters(context, actions[0]._Node__parameters) for k, v in p.items()}
 
 
-def test_default_bounds_preserved_and_negative_vio_origin_can_be_configured():
+def test_default_negative_bounds_and_configured_vio_origin():
     original = parameters()
     shifted = parameters(map_min_z=-.5, virtual_ceil_z=2.9)
-    assert original["grid_map/ground_height"] == -.01
+    assert original["grid_map/ground_height"] == -.1
     assert shifted["grid_map/ground_height"] == -.5
     assert shifted["grid_map/virtual_ceil_height"] == 2.9
     assert shifted["grid_map/ground_height"] < -.03445 < -.02031 < 0
@@ -36,7 +36,7 @@ def test_default_bounds_preserved_and_negative_vio_origin_can_be_configured():
     {"map_min_z": "nan"}, {"map_min_z": "inf"},
     {"virtual_ceil_z": "nan"}, {"map_size_z": "inf"},
     {"map_size_z": 0}, {"map_size_z": -1},
-    {"virtual_ceil_z": -.01}, {"virtual_ceil_z": 6},
+    {"virtual_ceil_z": -.1}, {"virtual_ceil_z": 6},
 ])
 def test_invalid_vertical_bounds_refuse_before_node_execution(overrides):
     with pytest.raises(ValueError, match="map_min_z"):

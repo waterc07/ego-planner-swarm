@@ -67,7 +67,7 @@ def generate_launch_description():
         DeclareLaunchArgument("map_size_x", default_value="40.0"),
         DeclareLaunchArgument("map_size_y", default_value="40.0"),
         DeclareLaunchArgument("map_size_z", default_value="6.0"),
-        DeclareLaunchArgument("map_min_z", default_value="-0.01",
+        DeclareLaunchArgument("map_min_z", default_value="-0.1",
                               description="Map lower Z in world_frame; not the measured floor height"),
         DeclareLaunchArgument("virtual_ceil_z", default_value="2.9"),
         DeclareLaunchArgument("cx", default_value="-1.0"),
